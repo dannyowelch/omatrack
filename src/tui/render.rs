@@ -11,13 +11,16 @@ use crate::module::{Cell, Sample, CHANNELS, SAMPLE_NAME_LEN, TITLE_LEN};
 use crate::notes::{effect_description, format_finetune, format_period};
 use crate::waveform::{marker_row, waveform_row};
 
+use crate::viz::VizMode;
+
 use super::app::{App, Focus, Followup, Overlay, TextTarget};
 use super::sample::{FieldKind, FieldPrompt, ImportPrompt, PathKind, PathPrompt};
 use super::theme::{paint, Theme};
+use super::viz::{self, PANEL_HEIGHT, PANEL_MIN_HEIGHT};
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "Ctrl-F file  Enter edit  ? help  Ctrl-S save  space play  q quit";
+const HELP: &str = "Ctrl-F file  Enter edit  F5 viz  ? help  Ctrl-S save  space play  q quit";
 
 const HELP_LINES: &[&str] = &[
     "Omatrack keys                                          ? or Esc closes",
@@ -26,7 +29,8 @@ const HELP_LINES: &[&str] = &[
     "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
     "Arrows move. Tab changes pane; in edit, Tab changes channel.",
-    "F1 F2 octave 1-3    F3 F4 step 0-16    Alt-1..4 mute    1-4 mute in browse",
+    "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles visualization",
+    "Alt-1..4 mute a channel while editing. 1-4 mute in browse.",
     "",
     "Edit mode. Lower row is the octave, upper row is one octave higher.",
     "  Z S X D C V G B H N J M    C C# D D# E F F# G G# A A# B",
@@ -58,15 +62,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
-    let row_window = usize::from(regions.pattern.height.saturating_sub(2)).saturating_sub(2);
-    let wave_lines = if app.focus == Focus::Samples { 2 } else { 0 };
-    let sample_window =
-        usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1 + wave_lines);
-    app.reconcile_scroll(row_window, sample_window);
+    if let Some(scope) = regions.scope {
+        viz::draw_scope_view(frame, scope, app, theme);
+    } else {
+        let row_window = usize::from(regions.pattern.height.saturating_sub(2)).saturating_sub(2);
+        let wave_lines = if app.focus == Focus::Samples { 2 } else { 0 };
+        let sample_window =
+            usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1 + wave_lines);
+        app.reconcile_scroll(row_window, sample_window);
 
-    draw_song(frame, regions.song, app, theme);
-    draw_pattern(frame, regions.pattern, app, theme);
-    draw_samples(frame, regions.samples, app, theme);
+        draw_song(frame, regions.song, app, theme);
+        draw_pattern(frame, regions.pattern, app, theme);
+        if let Some(panel) = regions.viz {
+            viz::draw_panel(frame, panel, app, theme);
+        }
+        draw_samples(frame, regions.samples, app, theme);
+    }
     frame.render_widget(
         Paragraph::new(clip(transport_text(app), regions.transport.width)).style(
             if app.audio_error.is_some() {
@@ -192,6 +203,8 @@ struct Regions {
     song: Rect,
     pattern: Rect,
     samples: Rect,
+    viz: Option<Rect>,
+    scope: Option<Rect>,
     transport: Rect,
     status: Rect,
     help: Rect,
@@ -209,21 +222,51 @@ fn layout(area: Rect, app: &App) -> Option<Regions> {
     ])
     .areas(area);
 
+    if app.viz_mode == VizMode::Scope {
+        return Some(Regions {
+            song: Rect::default(),
+            pattern: Rect::default(),
+            samples: Rect::default(),
+            viz: None,
+            scope: Some(body),
+            transport,
+            status,
+            help,
+        });
+    }
+
+    let panel = app.viz_mode == VizMode::Panel && area.height >= PANEL_MIN_HEIGHT;
+    let viz_h = if panel { PANEL_HEIGHT } else { 0 };
+    let upper = Rect {
+        x: body.x,
+        y: body.y,
+        width: body.width,
+        height: body.height.saturating_sub(viz_h),
+    };
+    let viz = panel.then_some(Rect {
+        x: body.x,
+        y: body.y.saturating_add(upper.height),
+        width: body.width,
+        height: viz_h,
+    });
+
     let inner_w = usize::from(area.width.saturating_sub(2));
     let order_lines = desired_order_lines(app, inner_w);
-    let header_h = header_height(body.height, order_lines);
-    let sample_h = sample_height(body.height, header_h);
+    let header_h = header_height(upper.height, order_lines);
+    let sample_h = sample_height(upper.height, header_h);
     let [song, pattern, samples] = Layout::vertical([
         Constraint::Length(header_h),
         Constraint::Fill(1),
         Constraint::Length(sample_h),
     ])
-    .areas(body);
+    .areas(upper);
 
     Some(Regions {
         song,
         pattern,
         samples,
+        viz,
+        scope: None,
         transport,
         status,
         help,
@@ -619,8 +662,13 @@ fn transport_text(app: &App) -> String {
         let mark = if *muted { "off" } else { "on" };
         channels.push_str(&format!("{}:{mark}", index + 1));
     }
+    let viz = match app.viz_mode {
+        VizMode::Off => "",
+        VizMode::Panel => "  Viz",
+        VizMode::Scope => "  Scope",
+    };
     format!(
-        "{mode}{dirty} {state}  Ord {:02}/{:02}  Row {:02}  Spd {:02}  Tmp {:03}  {channels}",
+        "{mode}{dirty} {state}  Ord {:02}/{:02}  Row {:02}  Spd {:02}  Tmp {:03}  {channels}{viz}",
         app.order_pos,
         app.song_len(),
         app.row,
@@ -1122,11 +1170,64 @@ mod tests {
         assert_has(&screen, "unsaved");
         assert_has(&screen, "import WAV");
         assert_has(&screen, "R still renames");
+        assert_has(&screen, "F5 cycles visualization");
 
         let mut app = demo();
         app.apply(Command::EnterNote(0));
         let screen = text_of(&render(&mut app, 80, 24));
         assert_has(&screen, "Demo Tune *");
         assert_has(&screen, "VIEW*");
+    }
+
+    #[test]
+    fn the_spectrum_fits_a_tall_terminal_and_stays_hidden_on_a_short_one() {
+        let mut app = demo();
+        app.apply(Command::CycleViz);
+        app.message = None;
+        let short = text_of(&render(&mut app, 80, 24));
+        assert_has(&short, "Demo Tune");
+        assert_has(&short, "C-1");
+        assert!(!short.contains("Spectrum"), "{short}");
+        assert_has(&short, "Viz");
+
+        let mut snap = quiet_tone();
+        app.tick_viz(Some(&snap), 0.08);
+        snap.gen = 2;
+        app.tick_viz(Some(&snap), 0.08);
+        let tall = text_of(&render(&mut app, 100, 40));
+        assert_has(&tall, "Spectrum");
+        assert_has(&tall, "Demo Tune");
+        assert_has(&tall, "C-1");
+        assert!(
+            tall.contains('▅') || tall.contains('█') || tall.contains('▇') || tall.contains('▄'),
+            "expected spectrum blocks in:\n{tall}"
+        );
+
+        app.apply(Command::CycleViz);
+        let scope = text_of(&render(&mut app, 100, 36));
+        assert_has(&scope, "Scope");
+        assert!(!scope.contains("kickdrum"), "{scope}");
+        assert!(
+            scope
+                .chars()
+                .any(|ch| ('\u{2800}'..='\u{28FF}').contains(&ch)),
+            "expected braille in:\n{scope}"
+        );
+        assert_has(&scope, "Stop");
+    }
+
+    fn quiet_tone() -> crate::viz::VizSnapshot {
+        let mut stereo = [0i16; crate::viz::WINDOW * 2];
+        for index in 0..crate::viz::WINDOW {
+            let sample = ((index as f32 * 0.15).sin() * 14_000.0) as i16;
+            stereo[index * 2] = sample;
+            stereo[index * 2 + 1] = sample / 2;
+        }
+        crate::viz::VizSnapshot {
+            stereo,
+            peaks: [6000, 2500, 4200, 800],
+            rate: 44_100,
+            gen: 1,
+        }
     }
 }

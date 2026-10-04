@@ -16,6 +16,7 @@ use std::process::ExitCode;
 use omatrack::demo;
 use omatrack::omarchy;
 use omatrack::tui::{draw, App, Command, Theme};
+use omatrack::viz::{VizSnapshot, WINDOW};
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use ratatui::Terminal;
@@ -23,7 +24,9 @@ use ratatui::Terminal;
 fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {
-        eprintln!("usage: screenshot <out.cells> [pattern|edit|help|file|phosphor|omarchy]");
+        eprintln!(
+            "usage: screenshot <out.cells> [pattern|edit|help|file|phosphor|omarchy|viz|scope]"
+        );
         return ExitCode::from(2);
     };
     let mode = args.next().unwrap_or_else(|| "pattern".to_string());
@@ -64,6 +67,17 @@ fn render(path: &PathBuf, mode: &str) -> io::Result<()> {
             app.set_theme(Theme::from_palette(&palette), "tokyo-night");
             app.apply(Command::TogglePlay);
         }
+        "viz" => {
+            app.apply(Command::TogglePlay);
+            app.apply(Command::CycleViz);
+            seed_viz(&mut app);
+        }
+        "scope" => {
+            app.apply(Command::TogglePlay);
+            app.apply(Command::CycleViz);
+            app.apply(Command::CycleViz);
+            seed_viz(&mut app);
+        }
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -72,7 +86,12 @@ fn render(path: &PathBuf, mode: &str) -> io::Result<()> {
         }
     }
 
-    let backend = TestBackend::new(100, 32);
+    let (width, height) = match mode {
+        "viz" => (110, 40),
+        "scope" => (100, 36),
+        _ => (100, 32),
+    };
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).map_err(io::Error::other)?;
     terminal
         .draw(|frame| draw(frame, &mut app))
@@ -89,6 +108,30 @@ fn render(path: &PathBuf, mode: &str) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn seed_viz(app: &mut App) {
+    let mut stereo = [0i16; WINDOW * 2];
+    for index in 0..WINDOW {
+        let t = index as f32 / 44_100.0;
+        let left = (t * 220.0 * std::f32::consts::TAU).sin() * 0.55
+            + (t * 440.0 * std::f32::consts::TAU).sin() * 0.28
+            + (t * 880.0 * std::f32::consts::TAU).sin() * 0.12;
+        let right = (t * 220.0 * std::f32::consts::TAU + 0.7).sin() * 0.40
+            + (t * 660.0 * std::f32::consts::TAU).sin() * 0.22;
+        stereo[index * 2] = (left.clamp(-1.0, 1.0) * 20_000.0) as i16;
+        stereo[index * 2 + 1] = (right.clamp(-1.0, 1.0) * 20_000.0) as i16;
+    }
+    let mut snap = VizSnapshot {
+        stereo,
+        peaks: [7600, 2800, 5400, 1400],
+        rate: 44_100,
+        gen: 1,
+    };
+    for generation in 1..=4 {
+        snap.gen = generation;
+        app.tick_viz(Some(&snap), 0.05);
+    }
 }
 
 fn hex(color: Color) -> String {

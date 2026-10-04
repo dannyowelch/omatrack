@@ -14,6 +14,7 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use crate::error::Error;
 use crate::module::Module;
 use crate::player::{Playback, PlayerConfig};
+use crate::viz::{VizAccum, VizBus, VizSnapshot};
 
 /// Shown when the host cannot see an output device.
 pub const NO_DEVICE: &str = "No audio output device. PipeWire, PulseAudio, and ALSA did not expose an output; check that a sound server is running and a device is connected";
@@ -54,6 +55,8 @@ pub struct AudioOutput {
     rate: Option<u32>,
     /// Interpolation, separation, and the rate to request from the device.
     preferences: PlayerConfig,
+    /// Latest mix window for the spectrum. The callback only stores atomics.
+    viz: Arc<VizBus>,
 }
 
 impl AudioOutput {
@@ -71,7 +74,16 @@ impl AudioOutput {
             error: Arc::new(Mutex::new(None)),
             rate: None,
             preferences: PlayerConfig::default(),
+            viz: Arc::new(VizBus::new()),
         }
+    }
+
+    /// Latest analysis window, if the callback has published one.
+    ///
+    /// This copies atomics and does not lock the mixer, so a slow UI frame
+    /// cannot stall the callback.
+    pub fn visualization(&self) -> Option<VizSnapshot> {
+        self.viz.load()
     }
 
     /// Mixer settings from the config file. The device rate still wins when it
@@ -129,7 +141,12 @@ impl AudioOutput {
         if let Ok(mut slot) = self.error.lock() {
             *slot = None;
         }
-        match build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error)) {
+        match build_stream(
+            &opened,
+            Arc::clone(&self.shared),
+            Arc::clone(&self.error),
+            Arc::clone(&self.viz),
+        ) {
             Ok(stream) => {
                 stream.play().map_err(|err| {
                     self.deactivate();
@@ -176,7 +193,12 @@ impl AudioOutput {
         if self.stream.is_none() {
             let opened = open_device(self.preferences.sample_rate)?;
             self.rate = Some(opened.config.sample_rate);
-            let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
+            let stream = build_stream(
+                &opened,
+                Arc::clone(&self.shared),
+                Arc::clone(&self.error),
+                Arc::clone(&self.viz),
+            )?;
             stream.play().map_err(|err| {
                 self.deactivate();
                 self.rate = None;
@@ -231,7 +253,12 @@ impl AudioOutput {
         if self.stream.is_none() {
             let opened = open_device(self.preferences.sample_rate)?;
             self.rate = Some(opened.config.sample_rate);
-            let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
+            let stream = build_stream(
+                &opened,
+                Arc::clone(&self.shared),
+                Arc::clone(&self.error),
+                Arc::clone(&self.viz),
+            )?;
             stream.play().map_err(|err| {
                 self.deactivate();
                 self.rate = None;
@@ -388,6 +415,7 @@ fn build_stream(
     opened: &OpenedDevice,
     shared: Arc<Mutex<Shared>>,
     error: Arc<Mutex<Option<String>>>,
+    viz: Arc<VizBus>,
 ) -> Result<Stream, Error> {
     let channels = opened.config.channels as usize;
     let err_fn = {
@@ -404,15 +432,30 @@ fn build_stream(
     };
     let name = opened.name.clone();
     let built = match opened.format {
-        SampleFormat::F32 => {
-            build_typed::<f32>(&opened.device, &opened.config, channels, shared, err_fn)
-        }
-        SampleFormat::I16 => {
-            build_typed::<i16>(&opened.device, &opened.config, channels, shared, err_fn)
-        }
-        SampleFormat::U16 => {
-            build_typed::<u16>(&opened.device, &opened.config, channels, shared, err_fn)
-        }
+        SampleFormat::F32 => build_typed::<f32>(
+            &opened.device,
+            &opened.config,
+            channels,
+            shared,
+            err_fn,
+            viz,
+        ),
+        SampleFormat::I16 => build_typed::<i16>(
+            &opened.device,
+            &opened.config,
+            channels,
+            shared,
+            err_fn,
+            viz,
+        ),
+        SampleFormat::U16 => build_typed::<u16>(
+            &opened.device,
+            &opened.config,
+            channels,
+            shared,
+            err_fn,
+            viz,
+        ),
         other => {
             return Err(Error::Audio(format!(
                 "the output device \"{name}\" uses {other:?}, which omatrack cannot play"
@@ -432,11 +475,14 @@ fn build_typed<T>(
     channels: usize,
     shared: Arc<Mutex<Shared>>,
     err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+    viz: Arc<VizBus>,
 ) -> Result<Stream, cpal::BuildStreamError>
 where
     T: cpal::SizedSample + SampleConvert,
 {
     let mut scratch = Vec::<i16>::new();
+    let mut accum = VizAccum::new();
+    let sample_rate = config.sample_rate;
     device.build_output_stream(
         config,
         move |data: &mut [T], _| {
@@ -445,55 +491,59 @@ where
             } else {
                 data.len() / channels
             };
-            render_scratch(&shared, frames, &mut scratch);
+            let peaks = render_scratch(&shared, frames, &mut scratch);
             for frame in 0..frames {
                 let left = scratch[frame * 2];
                 let right = scratch[frame * 2 + 1];
                 let base = frame * channels;
                 write_frame(&mut data[base..base + channels], left, right);
             }
+            let end = frames.saturating_mul(2).min(scratch.len());
+            accum.push(&scratch[..end], peaks, &viz, sample_rate);
         },
         err_fn,
         None,
     )
 }
 
-fn render_scratch(shared: &Mutex<Shared>, frames: usize, scratch: &mut Vec<i16>) {
+fn render_scratch(shared: &Mutex<Shared>, frames: usize, scratch: &mut Vec<i16>) -> [u16; 4] {
     scratch.resize(frames * 2, 0);
     let Ok(mut shared) = shared.lock() else {
         scratch.fill(0);
-        return;
+        return [0; 4];
     };
     if frames == 0 || !shared.active {
         scratch.fill(0);
-        return;
+        return [0; 4];
     }
     if shared.song {
         let Shared {
             module, playback, ..
         } = &mut *shared;
         playback.render(module, scratch);
-        return;
+        return playback.channel_peaks();
     }
     let left = shared.preview_left.unwrap_or(0);
     if left == 0 {
         scratch.fill(0);
         shared.active = false;
-        return;
+        return [0; 4];
     }
     let n = frames.min(usize::try_from(left).unwrap_or(frames));
     scratch[n * 2..].fill(0);
-    {
+    let peaks = {
         let Shared {
             module, playback, ..
         } = &mut *shared;
         playback.render(module, &mut scratch[..n * 2]);
-    }
+        playback.channel_peaks()
+    };
     let left = left.saturating_sub(u32::try_from(n).unwrap_or(left));
     shared.preview_left = Some(left);
     if left == 0 {
         shared.active = false;
     }
+    peaks
 }
 
 fn write_frame<T: SampleConvert>(frame: &mut [T], left: i16, right: i16) {

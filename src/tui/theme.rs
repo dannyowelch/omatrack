@@ -55,8 +55,12 @@ pub struct Theme {
     pub border_focus: Color,
     /// Channel header colors, channel 1 first.
     pub channels: [Color; 4],
-    /// Sample waveform.
+    /// Sample waveform, and the scope trace.
     pub waveform: Color,
+    /// Spectrum bar body.
+    pub spectrum: Color,
+    /// Spectrum peak mark and meter peak tick.
+    pub spectrum_peak: Color,
     /// Audio and file errors.
     pub error: Color,
 }
@@ -90,6 +94,8 @@ impl Theme {
                 Color::Rgb(255, 160, 196),
             ],
             waveform: Color::Rgb(170, 255, 170),
+            spectrum: Color::Rgb(80, 220, 255),
+            spectrum_peak: Color::Rgb(255, 214, 102),
             error: Color::Rgb(255, 96, 96),
         }
     }
@@ -122,6 +128,8 @@ impl Theme {
                 Color::Rgb(255, 220, 120),
             ],
             waveform: Color::Rgb(120, 255, 160),
+            spectrum: Color::Rgb(80, 255, 140),
+            spectrum_peak: Color::Rgb(230, 255, 160),
             error: Color::Rgb(255, 88, 64),
         }
     }
@@ -149,6 +157,8 @@ impl Theme {
             border_focus: Color::Yellow,
             channels: [Color::Yellow, Color::Green, Color::Cyan, Color::Magenta],
             waveform: Color::Cyan,
+            spectrum: Color::Cyan,
+            spectrum_peak: Color::Yellow,
             error: Color::Red,
         }
     }
@@ -159,8 +169,8 @@ impl Theme {
     /// `bright_foreground`, which is what Omarchy's terminal templates use.
     /// Edit mode uses the accent so it stays distinct from that cursor.
     /// The playback row mixes the background toward green. Channel headers
-    /// take red, yellow, green, and blue. The waveform uses cyan, and errors
-    /// use red.
+    /// take red, yellow, green, and blue. The waveform and the spectrum use
+    /// cyan, the spectrum peak uses yellow, and errors use red.
     pub fn from_palette(palette: &Palette) -> Self {
         let background = pick(palette, &["background", "color0"], Rgb { r: 0, g: 0, b: 0 });
         let text = pick(
@@ -208,6 +218,8 @@ impl Theme {
             border_focus: rgb(accent),
             channels: [rgb(red), rgb(yellow), rgb(green), rgb(blue)],
             waveform: rgb(cyan),
+            spectrum: rgb(cyan),
+            spectrum_peak: rgb(yellow),
             error: rgb(red),
         }
     }
@@ -242,6 +254,8 @@ impl Theme {
             border_focus: map(self.border_focus),
             channels: self.channels.map(map),
             waveform: map(self.waveform),
+            spectrum: map(self.spectrum),
+            spectrum_peak: map(self.spectrum_peak),
             error: map(self.error),
         }
     }

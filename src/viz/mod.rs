@@ -1,0 +1,57 @@
+//! Spectrum, channel meters, and the scope.
+//!
+//! The audio callback publishes a stereo window and four peak levels through
+//! [`VizBus`]. Everything after that — the FFT, the log bars, the meter
+//! ballistics, the braille canvas — is ordinary code the UI calls on its own
+//! thread. `--render` does not draw any of this; the same functions are what
+//! the tests call.
+
+mod ballistics;
+mod bands;
+mod bus;
+mod fft;
+mod scope;
+mod state;
+
+pub use ballistics::{Ballistics, Meter};
+pub use bands::{band_levels, log_bands, spectrum_bars, Band, F_MAX_HZ, F_MIN_HZ};
+pub(crate) use bus::VizAccum;
+pub use bus::{VizBus, VizSnapshot};
+pub use fft::{apply_hann, magnitudes};
+pub use scope::{draw_scope, ScopeCanvas, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
+pub use state::{channel_unit, VizState, BARS};
+
+/// Samples in one analysis window. Also the FFT length.
+pub const WINDOW: usize = 512;
+
+/// Which visualization is up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum VizMode {
+    /// The pattern editor, with no analyzer.
+    #[default]
+    Off,
+    /// Spectrum and four channel meters under the pattern.
+    Panel,
+    /// Full-screen vectorscope.
+    Scope,
+}
+
+impl VizMode {
+    /// Off, then the panel, then the scope, then off again.
+    pub fn cycle(self) -> Self {
+        match self {
+            Self::Off => Self::Panel,
+            Self::Panel => Self::Scope,
+            Self::Scope => Self::Off,
+        }
+    }
+
+    /// Short name for the status line.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Panel => "spectrum",
+            Self::Scope => "scope",
+        }
+    }
+}

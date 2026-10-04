@@ -610,6 +610,33 @@ fn showcase_plays_once_and_the_scale_is_in_the_left_channel() {
 }
 
 #[test]
+fn channel_peaks_follow_mute_and_volume() {
+    let module = tone(214, 0, 0);
+    let mut playback = start(&module, 8_000);
+    let frames = samples_per_tick(playback.sample_rate(), playback.tempo()) as usize;
+    let mut pcm = vec![0i16; frames * 2];
+    playback.render(&module, &mut pcm);
+    let loud = playback.channel_peaks();
+    assert!(loud[0] > 100, "{loud:?}");
+    assert_eq!(loud[1], 0);
+    assert_eq!(loud[2], 0);
+    assert_eq!(loud[3], 0);
+
+    playback.set_mute(0, true);
+    playback.render(&module, &mut pcm);
+    assert_eq!(playback.channel_peaks(), [0; 4]);
+
+    let silenced = tone(214, 0x0C, 0x00);
+    let mut playback = start(&silenced, 8_000);
+    playback.render(&silenced, &mut pcm);
+    assert_eq!(
+        playback.channel_peaks(),
+        [0; 4],
+        "C00 clears the channel before it is mixed"
+    );
+}
+
+#[test]
 fn preview_plays_one_sample_through_the_mixer() {
     let module = tone(428, 0, 0);
     let pcm = omatrack::player::render_preview(&module, 1, 428, 0, 8_000, 2_000);

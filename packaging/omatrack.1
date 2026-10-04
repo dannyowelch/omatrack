@@ -1,4 +1,4 @@
-.TH OMATRACK 1 "October 2026" "omatrack 0.1.0" "User Commands"
+.TH OMATRACK 1 "October 2026" "omatrack 0.2.0" "User Commands"
 .SH NAME
 omatrack \- ProTracker-style music tracker
 .SH SYNOPSIS
@@ -23,7 +23,11 @@ and
 .BR 4CHN ).
 With no
 .I file.mod
-it starts an empty module.
+it reopens the last module, or starts an empty module when there is none
+or
+.B \-\-no\-reopen
+is set.
+A missing or invalid remembered file starts empty and says why.
 .PP
 The view needs about 76 columns and 20 rows.
 Space plays from the cursor.
@@ -52,6 +56,10 @@ uses ANSI colors so the terminal's own palette shows through.
 .TP
 .BR \-\-config " \fIpath\fR"
 Read this config file instead of the default.
+.TP
+.B \-\-no\-reopen
+Do not load the last module on this launch.
+A file argument is still opened, and still becomes the remembered path.
 .TP
 .BR \-\-render " \fIout.wav\fR"
 Mix the song to 16-bit stereo WAV and exit.
@@ -143,6 +151,12 @@ Octave, 1 through 3.
 .TP
 .B F3 / F4
 Edit step, 0 through 16.
+.TP
+.B F5
+Cycle the visualization: hidden, then the spectrum and channel meters,
+then the full-screen scope, then hidden again.
+The spectrum needs about 28 rows; a shorter terminal keeps the pattern
+and F5 still reaches the scope.
 .PP
 In edit mode the lower piano row is
 .B Z S X D C V G B H N J M
@@ -165,6 +179,7 @@ An example is installed at
 .IR /usr/share/omatrack/config.toml .
 .PP
 .EX
+reopen_last = true
 theme = "auto"
 [audio]
 sample_rate = 44100
@@ -175,6 +190,15 @@ max_seconds = 600
 octave = 2
 step = 1
 .EE
+.PP
+.B reopen_last
+controls startup only.
+The path itself is stored under
+.I $XDG_STATE_HOME/omatrack/last_file
+or
+.IR ~/.local/state/omatrack/last_file ,
+not in this file.
+It is updated on open, save, and save as, and cleared for a new untitled module.
 .SH THEMES
 .B auto
 reads the active Omarchy theme.
@@ -211,6 +235,12 @@ skips that and uses the terminal palette directly.
 .TP
 .I ~/.config/omatrack/config.toml
 User configuration.
+.TP
+.I ~/.local/state/omatrack/last_file
+Last opened or saved module.
+Not edited by hand; see
+.B reopen_last
+above.
 .TP
 .I ~/.local/state/omarchy/current/theme/
 Active Omarchy theme on current installs.

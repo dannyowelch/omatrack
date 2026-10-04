@@ -66,6 +66,8 @@ pub struct Config {
     pub octave: u8,
     /// Rows to advance after a note, 0..=16.
     pub step: u8,
+    /// Load the last module when the command line does not name one.
+    pub reopen_last: bool,
 }
 
 impl Default for Config {
@@ -76,6 +78,7 @@ impl Default for Config {
             max_seconds: DEFAULT_MAX_SECONDS,
             octave: DEFAULT_OCTAVE,
             step: DEFAULT_STEP,
+            reopen_last: true,
         }
     }
 }
@@ -226,6 +229,15 @@ pub(crate) fn parse_text(text: &str) -> Result<Parsed, String> {
         }
     }
 
+    if let Some(flag) = table.get("reopen_last") {
+        match parse_bool(flag) {
+            Some(value) => config.reopen_last = value,
+            None => warnings.push(format!(
+                "reopen_last must be true or false, got {flag}; keeping true"
+            )),
+        }
+    }
+
     Ok(Parsed {
         config,
         warning: if warnings.is_empty() {
@@ -293,6 +305,14 @@ fn split_kv(line: &str, line_no: usize) -> Result<(String, String), String> {
     }
     let value = parse_value(value.trim()).map_err(|err| format!("line {line_no}: {err}"))?;
     Ok((key.to_string(), value))
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "on" | "1" => Some(true),
+        "false" | "no" | "off" | "0" => Some(false),
+        _ => None,
+    }
 }
 
 fn parse_value(value: &str) -> Result<String, String> {
@@ -468,5 +488,18 @@ mod tests {
         assert_eq!(parsed.config.max_seconds, 12.0);
         assert_eq!(parsed.config.octave, 3);
         assert_eq!(parsed.config.step, 0);
+        assert!(parsed.config.reopen_last);
+    }
+
+    #[test]
+    fn reopen_last_can_be_turned_off_without_dropping_the_rest() {
+        let parsed = parse_text("reopen_last = false\ntheme = \"terminal\"\n").unwrap();
+        assert!(parsed.warning.is_none(), "{:?}", parsed.warning);
+        assert!(!parsed.config.reopen_last);
+        assert_eq!(parsed.config.theme, ThemeRequest::Terminal);
+
+        let parsed = parse_text("reopen_last = \"maybe\"\n").unwrap();
+        assert!(parsed.warning.is_some());
+        assert!(parsed.config.reopen_last);
     }
 }

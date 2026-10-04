@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use omatrack::config::{self, ThemeRequest};
-use omatrack::module::Tag;
 use omatrack::player::{Interpolation, PlayerConfig};
+use omatrack::state::{self, LaunchPlan};
 use omatrack::tui::{self, Session};
 use omatrack::{Error, Module};
 
@@ -41,6 +41,7 @@ struct Options {
     render: Option<RenderOptions>,
     theme: Option<ThemeRequest>,
     config: Option<PathBuf>,
+    no_reopen: bool,
 }
 
 struct RenderOptions {
@@ -60,6 +61,8 @@ fn run() -> Result<(), MainError> {
     if let Some(theme) = options.theme {
         settings.theme = theme;
     }
+    let reopen = settings.reopen_last && !options.no_reopen;
+    let state_path = state::default_path();
 
     if let Some(render) = options.render {
         if let Some(warning) = &loaded.warning {
@@ -72,20 +75,32 @@ fn run() -> Result<(), MainError> {
             )));
         };
         let module = Module::load(&path).map_err(|err| MainError::Failed(annotate(&path, err)))?;
+        let _ = state::write(&state_path, &path);
         let player = merge_player(settings.audio, &render);
         let max_seconds = render.max_seconds.unwrap_or(settings.max_seconds);
         render_song(&module, &render.wav, player, max_seconds)?;
         return Ok(());
     }
 
-    let (module, path) = match options.module {
-        Some(path) => {
-            let module =
-                Module::load(&path).map_err(|err| MainError::Failed(annotate(&path, err)))?;
-            (module, path)
-        }
-        None => (Module::new(Tag::Mk), PathBuf::new()),
+    let remembered = if reopen {
+        state::read(&state_path)
+    } else {
+        None
     };
+    let plan = state::launch_plan(options.module, reopen, remembered);
+    let argument = match &plan {
+        LaunchPlan::File(path) => Some(path.clone()),
+        LaunchPlan::Reopen(_) | LaunchPlan::Empty => None,
+    };
+    let launched = state::launch(plan).map_err(|err| match argument {
+        Some(path) => MainError::Failed(annotate(&path, err)),
+        None => MainError::Failed(err.to_string()),
+    })?;
+    if let Some(path) = &launched.remember {
+        let _ = state::write(&state_path, path);
+    }
+    let module = launched.module;
+    let path = launched.path;
     let depth = tui::detect_color_depth();
     let home = config::home_dir();
     let state = config::xdg_state_home();
@@ -95,6 +110,9 @@ fn run() -> Result<(), MainError> {
         notice.push(warning);
     }
     if let Some(warning) = loaded_theme.warning.clone() {
+        notice.push(warning);
+    }
+    if let Some(warning) = launched.notice {
         notice.push(warning);
     }
     let session = Session {
@@ -114,6 +132,7 @@ fn run() -> Result<(), MainError> {
         } else {
             Some(notice.join(" "))
         },
+        state_path,
     };
     tui::run(session).map_err(|err| MainError::Failed(err.to_string()))?;
     Ok(())
@@ -185,6 +204,7 @@ fn parse(args: &[String]) -> Result<Options, MainError> {
     let mut separation = None;
     let mut theme = None;
     let mut config = None;
+    let mut no_reopen = false;
     let mut index = 0;
     while index < args.len() {
         let arg = args[index].as_str();
@@ -259,6 +279,9 @@ fn parse(args: &[String]) -> Result<Options, MainError> {
             "--config" => {
                 config = Some(PathBuf::from(next_value(args, &mut index, "--config")?));
             }
+            "--no-reopen" => {
+                no_reopen = true;
+            }
             other if other.starts_with('-') => {
                 return Err(MainError::Usage(format!(
                     "unknown option {other}\n{}",
@@ -287,6 +310,7 @@ fn parse(args: &[String]) -> Result<Options, MainError> {
         render,
         theme,
         config,
+        no_reopen,
     })
 }
 
@@ -324,9 +348,11 @@ Usage:
     omatrack --help
     omatrack --version
 
-With no file, omatrack starts a new empty module. Ctrl-F opens the file
-menu (new, open, save, save as). A * after the title means unsaved edits;
-quit, new, and open ask before discarding them.
+With no file, omatrack reopens the last module (unless --no-reopen is set
+or reopen_last is false). A missing or invalid remembered file starts an
+empty module and says why. Ctrl-F opens the file menu (new, open, save,
+save as). A * after the title means unsaved edits; quit, new, and open ask
+before discarding them.
 
 Opens a 31-sample, 4-channel .mod file (M.K., M!K!, FLT4, or 4CHN).
 The terminal needs about 76×20. Space plays from the cursor. Enter
@@ -336,6 +362,7 @@ the error stays on the transport bar.
 
     --theme <name>         auto, omarchy, protracker, phosphor, or terminal
     --config <path>        config file (default ~/.config/omatrack/config.toml)
+    --no-reopen            do not load the last module on this launch
     --render <out.wav>     mix the song to a 16-bit stereo WAV and exit
     --rate <hz>            WAV sample rate (config, or 44100)
     --max-seconds <n>      safety cap for songs that do not loop (config, or 600)
@@ -360,6 +387,7 @@ Keys:
     1 2 3 4              mute channel (Alt-1..4 in edit mode)
     Up/Down, j/k         move the cursor
     Left/Right, h/l      change channel (pattern view)
+    F5                   cycle visualization: off, spectrum, scope
     PgUp/PgDn            page
     Home/End             first or last row, or sample
     [ ]                  previous / next order position
@@ -437,6 +465,10 @@ mod tests {
         let empty = parse(&args(&[])).unwrap();
         assert!(empty.module.is_none());
         assert!(empty.render.is_none());
+        assert!(!empty.no_reopen);
+        let skipped = parse(&args(&["--no-reopen", "song.mod"])).unwrap();
+        assert!(skipped.no_reopen);
+        assert_eq!(skipped.module, Some(PathBuf::from("song.mod")));
         assert!(matches!(
             parse(&args(&["song.mod", "--theme", "nope"])),
             Err(MainError::Usage(_))

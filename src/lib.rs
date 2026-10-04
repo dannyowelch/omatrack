@@ -9,7 +9,8 @@
 //! [`edit::Editor`] mutates a [`Module`] and keeps the undo stack beside the
 //! document, not inside the file format. [`tui::Theme`] paints from a built-in
 //! palette or from the active Omarchy theme. [`config`] reads
-//! `~/.config/omatrack/config.toml`.
+//! `~/.config/omatrack/config.toml`. [`state`] remembers the last module path.
+//! [`viz`] turns the mix into spectrum bars, channel meters, and a scope.
 
 #![forbid(unsafe_code)]
 
@@ -25,7 +26,9 @@ pub mod notes;
 pub mod omarchy;
 pub mod player;
 pub mod sample_edit;
+pub mod state;
 pub mod tui;
+pub mod viz;
 pub mod wav;
 pub mod waveform;
 
