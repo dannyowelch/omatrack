@@ -900,12 +900,21 @@ impl App {
         self.order_pos = 0;
         self.row = 0;
         self.row_offset = 0;
-        let pattern = usize::from(self.module.order[0]);
-        if pattern < self.module.patterns.len() {
-            self.retarget_pattern(pattern);
+        self.channel_scroll = 0;
+        if self.track.is_some() {
+            self.retarget_from_order();
+            if let Some(song) = &self.track {
+                self.speed = song.initial_speed.max(1);
+                self.tempo = song.initial_tempo.max(1);
+            }
+        } else {
+            let pattern = usize::from(self.module.order[0]);
+            if pattern < self.module.patterns.len() {
+                self.retarget_pattern(pattern);
+            }
+            self.speed = DEFAULT_SPEED;
+            self.tempo = DEFAULT_TEMPO;
         }
-        self.speed = DEFAULT_SPEED;
-        self.tempo = DEFAULT_TEMPO;
         self.viz = VizState::new();
         if self.playing {
             self.audio_error = None;

@@ -259,7 +259,12 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
             // when playback stays stopped and no new window is coming.
             audio.clear_visualization();
             if app.playing {
-                if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
+                let started = if let Some(song) = &app.track {
+                    audio.start_track(song, app.order_pos, app.row, &app.muted)
+                } else {
+                    audio.start(&app.module, app.order_pos, app.row, &app.muted)
+                };
+                if let Err(err) = started {
                     app.fail_audio(err.to_string());
                 }
             }

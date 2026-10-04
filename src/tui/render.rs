@@ -44,8 +44,7 @@ const HELP_LINES: &[&str] = &[
     "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
     "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
-    "Ctrl-T title. Samples: R renames. i import WAV, o export, Ctrl-G render.",
-    "XM and IT open read-only (envelopes play; editing and saving those formats do not).",
+    "Ctrl-T title. Samples: R renames. XM/IT read-only. i import WAV, Ctrl-G render.",
     "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
     "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
 ];
