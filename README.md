@@ -13,7 +13,7 @@ cargo build --release
 cargo run -- path/to/song.mod
 ```
 
-There is no demo song in the repo (module files are gitignored, and copyrighted modules do not belong here). Generate a small original one and open it:
+Copyrighted modules do not belong in the repo. The tests load freely licensed fixtures from `tests/data/` (CC0, public domain, CC BY 4.0, and BSD-3-Clause; see `tests/data/README.md` and `tests/data/ATTRIBUTION.txt`). Other `*.mod` paths stay gitignored. Generate a small original song and open it:
 
 ```bash
 cargo run --example write_showcase -- /tmp/omatrack-showcase.mod
@@ -119,7 +119,7 @@ The reader and writer share one layout: 20-byte title, 31 × 30-byte sample head
 
 Pattern count is `max(order) + 1` over all 128 order bytes, including slots past the song length. That is the ProTracker rule, and it is what makes `parse` then `write` return the same bytes. Names, the restart byte, finetune bits above the low nibble, volumes above 64, and any suffix after the samples are kept. Cells that do not fit the bit fields (period wider than 12 bits, effect wider than 4 bits) are rejected on write rather than silently truncated.
 
-A short file, a bad tag, or a song length outside `1..=128` returns an error. 15-sample modules and 2/6/8-channel tags are not this format and are rejected. Tests synthesize their own modules; do not commit copyrighted `.mod` files.
+A short file, a bad tag, or a song length outside `1..=128` returns an error. 15-sample modules and 2/6/8-channel tags are not this format and are rejected. Tests synthesize modules and also round-trip the fixtures in `tests/data/`. Do not commit copyrighted `.mod` files.
 
 ## Layout
 

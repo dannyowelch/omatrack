@@ -1,6 +1,7 @@
 //! Parser and writer tests against the public library API.
 //!
 //! Modules here are synthesized. Do not point these tests at copyrighted songs.
+//! Freely licensed fixtures live in `tests/data` and are loaded by `sample_fixtures`.
 
 use omatrack::{Cell, Module, Tag, HEADER_LEN, PATTERN_BYTES};
 

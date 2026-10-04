@@ -3,5 +3,6 @@
 *.pdb
 .DS_Store
 
-# Song data is not source. Tests synthesize modules in memory.
+# Song data is not source. Freely licensed fixtures under tests/data are the exception.
 *.mod
+!tests/data/*.mod
