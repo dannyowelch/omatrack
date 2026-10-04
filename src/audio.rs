@@ -15,6 +15,7 @@ use cpal::{SampleFormat, Stream, StreamConfig};
 use crate::error::Error;
 use crate::module::Module;
 use crate::player::{Playback, PlayerConfig};
+use crate::track::{self, Song};
 use crate::viz::{VizAccum, VizBus, VizSnapshot};
 
 /// Mix on the UI thread and publish analyzer windows without opening a device.
@@ -55,9 +56,17 @@ pub struct Snapshot {
     pub active: bool,
 }
 
+struct TrackMix {
+    song: Song,
+    playback: track::Playback,
+}
+
 struct Shared {
     module: Module,
     playback: Playback,
+    track: Option<TrackMix>,
+    /// Peaks for every channel of an XM/IT song. Empty while a `.mod` is playing.
+    track_peaks: Vec<u16>,
     active: bool,
     /// The callback is mixing the song, not a note preview.
     song: bool,
@@ -92,6 +101,8 @@ impl AudioOutput {
             shared: Arc::new(Mutex::new(Shared {
                 module: Module::default(),
                 playback: Playback::new(PlayerConfig::default()),
+                track: None,
+                track_peaks: Vec::new(),
                 active: false,
                 song: false,
                 preview_left: None,
@@ -145,7 +156,7 @@ impl AudioOutput {
         module: &Module,
         order: usize,
         row: usize,
-        muted: [bool; 4],
+        muted: &[bool],
     ) -> Result<(), Error> {
         self.stop();
         if software_audio_enabled() {
@@ -156,11 +167,108 @@ impl AudioOutput {
         self.rate = Some(opened.config.sample_rate);
         let module = module.clone();
         let mut playback = Playback::new(config);
-        for (channel, mute) in muted.into_iter().enumerate() {
+        for (channel, mute) in muted.iter().copied().enumerate() {
             playback.set_mute(channel, mute);
         }
         playback.start(&module, order, row);
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.track = None;
+            shared.track_peaks.clear();
+        }
         self.play_opened(opened, module, playback)
+    }
+
+    /// Play an XM or IT song. Panning comes from the file.
+    pub fn start_track(
+        &mut self,
+        song: &Song,
+        order: usize,
+        row: usize,
+        muted: &[bool],
+    ) -> Result<(), Error> {
+        self.stop();
+        if software_audio_enabled() {
+            return self.start_track_software(song, order, row, muted);
+        }
+        let opened = open_device(self.preferences.sample_rate)?;
+        let config = self.mix_config(opened.config.sample_rate);
+        self.rate = Some(opened.config.sample_rate);
+        let song = song.clone();
+        let mut playback = track::Playback::new(config);
+        playback.start(&song, order, row);
+        for (channel, mute) in muted.iter().copied().enumerate() {
+            playback.set_mute(channel, mute);
+        }
+        {
+            let mut shared = lock_shared(&self.shared);
+            shared.track = Some(TrackMix { song, playback });
+            shared.track_peaks.clear();
+            shared.module = Module::default();
+            shared.playback = Playback::new(self.mix_config(opened.config.sample_rate));
+            shared.active = true;
+            shared.song = true;
+            shared.preview_left = None;
+        }
+        if let Ok(mut slot) = self.error.lock() {
+            *slot = None;
+        }
+        // The device callback renders through `shared.track`. Reuse the mod
+        // stream builder; `render_scratch` dispatches on `track`.
+        match build_stream(
+            &opened,
+            Arc::clone(&self.shared),
+            Arc::clone(&self.error),
+            Arc::clone(&self.viz),
+        ) {
+            Ok(stream) => {
+                stream.play().map_err(|err| {
+                    self.deactivate();
+                    Error::Audio(format!(
+                        "could not start playback on \"{}\": {err}",
+                        opened.name
+                    ))
+                })?;
+                self.stream = Some(stream);
+                Ok(())
+            }
+            Err(err) => {
+                self.deactivate();
+                Err(err)
+            }
+        }
+    }
+
+    fn start_track_software(
+        &mut self,
+        song: &Song,
+        order: usize,
+        row: usize,
+        muted: &[bool],
+    ) -> Result<(), Error> {
+        let rate = self.preferences.sample_rate.max(1);
+        let config = self.mix_config(rate);
+        let song = song.clone();
+        let mut playback = track::Playback::new(config);
+        playback.start(&song, order, row);
+        for (channel, mute) in muted.iter().copied().enumerate() {
+            playback.set_mute(channel, mute);
+        }
+        {
+            let mut shared = lock_shared(&self.shared);
+            shared.track = Some(TrackMix { song, playback });
+            shared.track_peaks.clear();
+            shared.active = true;
+            shared.song = true;
+            shared.preview_left = None;
+        }
+        if let Ok(mut slot) = self.error.lock() {
+            *slot = None;
+        }
+        self.rate = Some(rate);
+        self.software = true;
+        self.accum = VizAccum::new();
+        self.last_pump = Instant::now();
+        Ok(())
     }
 
     fn play_opened(
@@ -249,13 +357,13 @@ impl AudioOutput {
         module: &Module,
         order: usize,
         row: usize,
-        muted: [bool; 4],
+        muted: &[bool],
     ) -> Result<(), Error> {
         let rate = self.preferences.sample_rate.max(1);
         let config = self.mix_config(rate);
         let module = module.clone();
         let mut playback = Playback::new(config);
-        for (channel, mute) in muted.into_iter().enumerate() {
+        for (channel, mute) in muted.iter().copied().enumerate() {
             playback.set_mute(channel, mute);
         }
         playback.start(&module, order, row);
@@ -263,6 +371,8 @@ impl AudioOutput {
             let mut shared = lock_shared(&self.shared);
             shared.module = module;
             shared.playback = playback;
+            shared.track = None;
+            shared.track_peaks.clear();
             shared.active = true;
             shared.song = true;
             shared.preview_left = None;
@@ -414,13 +524,37 @@ impl AudioOutput {
     /// Silence one channel, or bring it back.
     pub fn set_mute(&self, channel: usize, muted: bool) {
         if let Ok(mut shared) = self.shared.lock() {
-            shared.playback.set_mute(channel, muted);
+            if let Some(mix) = shared.track.as_mut() {
+                mix.playback.set_mute(channel, muted);
+            } else {
+                shared.playback.set_mute(channel, muted);
+            }
+        }
+    }
+
+    /// Latest per-channel peaks for an XM/IT song, if one is playing.
+    pub fn track_peaks(&self) -> Option<Vec<u16>> {
+        let shared = self.shared.lock().ok()?;
+        if shared.track.is_some() {
+            Some(shared.track_peaks.clone())
+        } else {
+            None
         }
     }
 
     /// Last position the callback published. `None` if the lock is poisoned.
     pub fn snapshot(&self) -> Option<Snapshot> {
         let shared = self.shared.lock().ok()?;
+        if let Some(mix) = &shared.track {
+            return Some(Snapshot {
+                order: mix.playback.order(),
+                row: mix.playback.row(),
+                pattern: mix.playback.pattern_index(&mix.song),
+                speed: mix.playback.speed(),
+                tempo: mix.playback.tempo(),
+                active: shared.active,
+            });
+        }
         Some(Snapshot {
             order: shared.playback.order(),
             row: shared.playback.row(),
@@ -622,6 +756,17 @@ fn render_scratch(shared: &Mutex<Shared>, frames: usize, scratch: &mut Vec<i16>)
         return [0; 4];
     }
     if shared.song {
+        if shared.track.is_some() {
+            let peaks = {
+                let mix = shared.track.as_mut().unwrap();
+                mix.playback.render(&mix.song, scratch);
+                mix.playback.channel_peaks().to_vec()
+            };
+            let folded = fold_peaks(&peaks);
+            shared.track_peaks = peaks;
+            return folded;
+        }
+        shared.track_peaks.clear();
         let Shared {
             module, playback, ..
         } = &mut *shared;
@@ -649,6 +794,14 @@ fn render_scratch(shared: &Mutex<Shared>, frames: usize, scratch: &mut Vec<i16>)
         shared.active = false;
     }
     peaks
+}
+
+fn fold_peaks(peaks: &[u16]) -> [u16; 4] {
+    let mut folded = [0; 4];
+    for (slot, peak) in folded.iter_mut().zip(peaks) {
+        *slot = *peak;
+    }
+    folded
 }
 
 fn write_frame<T: SampleConvert>(frame: &mut [T], left: i16, right: i16) {
@@ -710,7 +863,7 @@ mod tests {
     fn the_default_device_either_opens_or_names_the_failure() {
         let module = crate::demo::showcase();
         let mut output = AudioOutput::new();
-        match output.start(&module, 0, 0, [false; 4]) {
+        match output.start(&module, 0, 0, &[false; 4]) {
             Ok(()) => {
                 std::thread::sleep(std::time::Duration::from_millis(50));
                 let snapshot = output.snapshot().expect("snapshot");

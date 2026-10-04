@@ -45,6 +45,7 @@ const HELP_LINES: &[&str] = &[
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
     "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
     "Ctrl-T title. Samples: R renames. i import WAV, o export, Ctrl-G render.",
+    "XM and IT open read-only (envelopes play; editing and saving those formats do not).",
     "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
     "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
 ];
@@ -317,7 +318,11 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let inner_h = usize::from(area.height.saturating_sub(2));
     let mut lines = Vec::new();
     if inner_h > 0 {
-        let title = app.module.display_title();
+        let title = if let Some(song) = &app.track {
+            song.title.clone()
+        } else {
+            app.module.display_title()
+        };
         let dirty = if app.is_dirty() { " *" } else { "" };
         let (text, style) = if title.is_empty() {
             (format!("(untitled){dirty}"), theme.dim())
@@ -327,14 +332,26 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         lines.push(styled(text, style));
     }
     if inner_h > 1 {
-        let info = format!(
-            "Length {}   Restart {}   Patterns {}   {}   Theme {}",
-            app.module.song_length,
-            app.module.restart,
-            app.module.patterns.len(),
-            app.module.tag.as_str(),
-            fit_chars(&app.theme_label, 24),
-        );
+        let info = if let Some(song) = &app.track {
+            format!(
+                "Length {}   Restart {}   Patterns {}   {} {}ch   Theme {}",
+                song.order_len(),
+                song.restart,
+                song.patterns.len(),
+                song.format.label(),
+                song.channels,
+                fit_chars(&app.theme_label, 16),
+            )
+        } else {
+            format!(
+                "Length {}   Restart {}   Patterns {}   {}   Theme {}",
+                app.module.song_length,
+                app.module.restart,
+                app.module.patterns.len(),
+                app.module.tag.as_str(),
+                fit_chars(&app.theme_label, 24),
+            )
+        };
         lines.push(styled(fit_chars(&info, inner_w), theme.text()));
     }
     let room = inner_h.saturating_sub(lines.len());
@@ -344,7 +361,11 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
-fn draw_pattern(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    if app.track.is_some() {
+        draw_track_pattern(frame, area, app, theme);
+        return;
+    }
     let focused = app.focus == Focus::Pattern;
     let title = if app.editing { "EDIT" } else { "Pattern" };
     let block = pane(title, focused, theme);
@@ -377,7 +398,142 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
+    let focused = app.focus == Focus::Pattern;
+    let block = pane("Pattern", focused, theme);
+    let inner_w = usize::from(area.width.saturating_sub(2));
+    let inner_h = usize::from(area.height.saturating_sub(2));
+    let row_window = inner_h.saturating_sub(2);
+    let channels = app.channel_count();
+    let visible = inner_w.saturating_sub(3) / TRACK_CELL;
+    let visible = visible.max(1).min(channels);
+    app.reveal_channel(visible);
+    let start_ch = app.channel_scroll;
+    let end_ch = (start_ch + visible).min(channels);
+    let mut lines = Vec::new();
+    if inner_h > 0 {
+        lines.push(styled(
+            pattern_info(app),
+            paint(theme.accent, theme.background, false),
+        ));
+    }
+    if inner_h > 1 {
+        lines.push(track_header_line(theme, start_ch, end_ch));
+    }
+    let song_rows = app.row_count();
+    let row_start = app.row_offset;
+    let row_end = (row_start + row_window).min(song_rows);
+    if let Some(song) = &app.track {
+        for row in row_start..row_end {
+            lines.push(track_row(song, row, start_ch, end_ch, app, theme, inner_w));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+const TRACK_CELL: usize = 11;
+
+fn track_header_line(theme: Theme, start: usize, end: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    for channel in start..end {
+        if channel > start {
+            spans.push(Span::styled(" ".to_string(), theme.dim()));
+        }
+        let label = format!(
+            "{:<width$}",
+            format!("Ch{}", channel + 1),
+            width = TRACK_CELL - 1
+        );
+        let color = theme.channels[channel % theme.channels.len()];
+        spans.push(Span::styled(label, paint(color, theme.background, false)));
+    }
+    Line::from(spans)
+}
+
+fn track_row(
+    song: &crate::Song,
+    row: usize,
+    start_ch: usize,
+    end_ch: usize,
+    app: &App,
+    theme: Theme,
+    inner_w: usize,
+) -> Line<'static> {
+    let on_row = row == app.row;
+    let line_bg = if on_row && app.playing {
+        theme.play_bg
+    } else if on_row {
+        theme.row_bg
+    } else {
+        theme.background
+    };
+    let mut spans = vec![Span::styled(
+        format!("{row:02} "),
+        paint(theme.accent, line_bg, false),
+    )];
+    let pattern = song.patterns.get(app.view_pattern);
+    let mut width = 3usize;
+    for channel in start_ch..end_ch {
+        if channel > start_ch {
+            spans.push(Span::styled(
+                " ".to_string(),
+                paint(theme.dim, line_bg, false),
+            ));
+            width += 1;
+        }
+        let cell = pattern
+            .and_then(|pattern| pattern.rows.get(row))
+            .and_then(|row| row.get(channel))
+            .copied()
+            .unwrap_or_else(crate::track::Cell::empty);
+        let active = on_row && channel == app.channel && app.focus == Focus::Pattern;
+        let text = track_cell_text(song, cell);
+        let padded = format!("{:<width$}", text, width = TRACK_CELL - 1);
+        let (fg, bg, bold) = if active {
+            (theme.cursor_fg, theme.cursor_bg, true)
+        } else if cell.note == 0 {
+            (theme.dim, line_bg, false)
+        } else {
+            (theme.note, line_bg, false)
+        };
+        spans.push(Span::styled(padded, paint(fg, bg, bold)));
+        width += TRACK_CELL - 1;
+    }
+    let pad = inner_w.saturating_sub(width);
+    if on_row && pad > 0 {
+        spans.push(Span::styled(
+            " ".repeat(pad),
+            paint(theme.text, line_bg, false),
+        ));
+    }
+    Line::from(spans)
+}
+
+fn track_cell_text(song: &crate::Song, cell: crate::track::Cell) -> String {
+    let instrument = if cell.instrument == 0 {
+        "--".to_string()
+    } else if cell.instrument > 99 {
+        format!("{:02X}", cell.instrument)
+    } else {
+        format!("{:02}", cell.instrument)
+    };
+    let volume = if cell.has_volume {
+        format!("{:02X}", cell.volume)
+    } else {
+        "--".to_string()
+    };
+    format!(
+        "{}{instrument}{volume}{}",
+        crate::track::format_note(cell.note),
+        crate::track::format_effect(song.format, cell.effect, cell.param)
+    )
+}
+
 fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    if app.track.is_some() {
+        draw_track_samples(frame, area, app, theme);
+        return;
+    }
     let focused = app.focus == Focus::Samples;
     let block = pane("Samples", focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
@@ -423,6 +579,62 @@ fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             text.push_str(&" ".repeat(pad));
         }
         lines.push(styled(text, style));
+    }
+    frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn draw_track_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    let focused = app.focus == Focus::Samples;
+    let block = pane("Samples", focused, theme);
+    let inner_w = usize::from(area.width.saturating_sub(2));
+    let inner_h = usize::from(area.height.saturating_sub(2));
+    let Some(song) = &app.track else {
+        return;
+    };
+    let mut lines = Vec::new();
+    if inner_h > 0 {
+        lines.push(styled(
+            format!(
+                "{:>3} {:<22} {:>7} {:>3} {}",
+                "#", "Name", "Frames", "Vol", "Loop"
+            ),
+            theme.dim(),
+        ));
+    }
+    let window = inner_h.saturating_sub(lines.len());
+    let total = song.samples.len();
+    let start = app.sample_offset.min(total);
+    let end = (start + window).min(total);
+    for index in start..end {
+        let sample = &song.samples[index];
+        let selected = index == app.sample;
+        let style = if selected && focused {
+            paint(theme.cursor_fg, theme.cursor_bg, true)
+        } else if selected {
+            paint(theme.text, theme.row_bg, false)
+        } else {
+            theme.text()
+        };
+        let looped = match sample.loop_kind {
+            crate::track::LoopKind::Forward => "fwd",
+            crate::track::LoopKind::PingPong => "pp",
+            crate::track::LoopKind::None => "-",
+        };
+        let mut text = format!(
+            "{:03} {:<22} {:7} {:3} {looped}",
+            index + 1,
+            fit_chars(&sample.name, 22),
+            sample.pcm.len(),
+            sample.volume,
+        );
+        let pad = inner_w.saturating_sub(text.chars().count());
+        if selected && pad > 0 {
+            text.push_str(&" ".repeat(pad));
+        }
+        lines.push(styled(text, style));
+    }
+    if total == 0 && inner_h > lines.len() {
+        lines.push(styled("No samples.".to_string(), theme.dim()));
     }
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
@@ -662,12 +874,16 @@ fn transport_text(app: &App) -> String {
     let mode = if app.editing { "EDIT" } else { "VIEW" };
     let dirty = if app.is_dirty() { "*" } else { "" };
     let mut channels = String::new();
-    for (index, muted) in app.muted.iter().enumerate() {
-        if index > 0 {
-            channels.push(' ');
+    if app.channel_count() > 4 {
+        channels = format!("{}ch", app.channel_count());
+    } else {
+        for (index, muted) in app.muted.iter().enumerate() {
+            if index > 0 {
+                channels.push(' ');
+            }
+            let mark = if *muted { "off" } else { "on" };
+            channels.push_str(&format!("{}:{mark}", index + 1));
         }
-        let mark = if *muted { "off" } else { "on" };
-        channels.push_str(&format!("{}:{mark}", index + 1));
     }
     let viz = match app.viz_mode {
         VizMode::Off => "",
@@ -692,6 +908,22 @@ fn status_text(app: &App) -> String {
     }
     if let Some(notice) = &app.notice {
         return notice.clone();
+    }
+    if let Some(song) = &app.track {
+        let cell = song
+            .cell(app.view_pattern, app.row, app.channel)
+            .unwrap_or_else(crate::track::Cell::empty);
+        let volume = if cell.has_volume {
+            format!("{:02X}", cell.volume)
+        } else {
+            "--".to_string()
+        };
+        return format!(
+            "{}  inst {:02}  {volume}  {}  read-only",
+            crate::track::format_note(cell.note),
+            cell.instrument,
+            crate::track::format_effect(song.format, cell.effect, cell.param),
+        );
     }
     let Some(cell) = app.current_cell() else {
         return "Pattern is not in the file.".to_string();
@@ -727,7 +959,11 @@ fn order_lines(app: &App, theme: Theme, inner_w: usize, max_lines: usize) -> Vec
         if row.len() == per_line {
             rows.push(std::mem::take(&mut row));
         }
-        let value = app.module.order[index];
+        let value = if let Some(song) = &app.track {
+            song.orders.get(index).copied().unwrap_or(0)
+        } else {
+            app.module.order[index]
+        };
         let text = if entry_w >= 4 {
             format!("{value:03} ")
         } else {
@@ -767,11 +1003,20 @@ fn desired_order_lines(app: &App, inner_w: usize) -> u16 {
 }
 
 fn order_entry_width(app: &App, song_len: usize) -> usize {
-    let max = app.module.order[..song_len]
-        .iter()
-        .copied()
-        .max()
-        .unwrap_or(0);
+    let max = if let Some(song) = &app.track {
+        song.orders
+            .iter()
+            .take(song_len)
+            .copied()
+            .max()
+            .unwrap_or(0)
+    } else {
+        app.module.order[..song_len]
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0)
+    };
     if max >= 100 {
         4
     } else {

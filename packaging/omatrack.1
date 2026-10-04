@@ -3,7 +3,7 @@
 omatrack \- ProTracker-style music tracker
 .SH SYNOPSIS
 .B omatrack
-[\fIoptions\fR] [\fIfile.mod\fR]
+[\fIoptions\fR] [\fIfile\fR]
 .br
 .B omatrack \-\-render
 .I out.wav
@@ -20,10 +20,25 @@ is a terminal tracker for 31-sample, 4-channel ProTracker modules
 .BR M!K! ,
 .BR FLT4 ,
 and
-.BR 4CHN ).
-With no
-.I file.mod
-it reopens the last module, or starts an empty module when there is none
+.BR 4CHN ),
+and a player for FastTracker 2
+.B .xm
+and Impulse Tracker
+.B .it
+files.
+Format is detected from the header
+.RB ( "Extended Module: "
+or
+.BR IMPM ),
+not only from the extension.
+XM and IT songs are shown and played, including more than four channels, and are read-only: the editor will not change them, and saving them is not supported, so the original file is left untouched.
+.B .mod
+remains the only format that can be edited and saved.
+With no file it reopens the last module, including
+.B .xm
+and
+.BR .it ,
+or starts an empty module when there is none
 or
 .B \-\-no\-reopen
 is set.

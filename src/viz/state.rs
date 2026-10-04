@@ -33,6 +33,8 @@ pub const BARS: usize = 48;
 pub struct VizState {
     bars: Vec<Meter>,
     meters: [Meter; 4],
+    /// Meters past the first four, used by XM/IT songs. `.mod` leaves this empty.
+    extra: Vec<Meter>,
     stereo: Vec<f32>,
     phase: f32,
     last_gen: u64,
@@ -59,6 +61,7 @@ impl Default for VizState {
         Self {
             bars: vec![Meter::default(); BARS],
             meters: [Meter::default(); 4],
+            extra: Vec::new(),
             stereo: Vec::new(),
             phase: 0.0,
             last_gen: 0,
@@ -187,6 +190,9 @@ impl VizState {
         for meter in &mut self.meters {
             meter.update(0.0, dt, meter_ballistics);
         }
+        for meter in &mut self.extra {
+            meter.update(0.0, dt, meter_ballistics);
+        }
     }
 
     /// Smooth `raw` into the bars.
@@ -229,11 +235,37 @@ impl VizState {
     }
 
     /// Smoothed channel level and its peak-hold mark.
+    ///
+    /// Indexes `0..4` are the original four meters. Higher indexes are the
+    /// extra meters filled by [`Self::push_extra_peaks`].
     pub fn meter(&self, index: usize) -> (f32, f32) {
-        self.meters
-            .get(index)
+        if let Some(meter) = self.meters.get(index) {
+            return (meter.level, meter.peak);
+        }
+        self.extra
+            .get(index - 4)
             .map(|meter| (meter.level, meter.peak))
             .unwrap_or((0.0, 0.0))
+    }
+
+    /// Drive meters past the first four from mixer peaks.
+    ///
+    /// The first four keep coming from the mix window, so a `.mod` is unchanged.
+    /// `peaks` is the full channel list; entries `4..` update [`Self::extra`].
+    pub fn push_extra_peaks(&mut self, peaks: &[u16], dt: f32) {
+        let extra = peaks.len().saturating_sub(4);
+        if self.extra.len() != extra {
+            self.extra.resize(extra, Meter::default());
+        }
+        let ballistics = Ballistics::meter();
+        let dt = if dt.is_finite() {
+            dt.clamp(0.0, 0.25)
+        } else {
+            0.0
+        };
+        for (meter, peak) in self.extra.iter_mut().zip(peaks.iter().skip(4)) {
+            meter.update(channel_unit(*peak), dt, ballistics);
+        }
     }
 
     /// Latest stereo window, interleaved, about `-1..=1`.

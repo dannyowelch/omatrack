@@ -16,6 +16,39 @@ use crate::SAMPLE_COUNT;
 
 use super::app::{App, Command, Outcome};
 
+fn tracked_edit(command: Command) -> bool {
+    matches!(
+        command,
+        Command::BeginImport
+            | Command::BeginExportSample
+            | Command::BeginVolume
+            | Command::BeginFinetune
+            | Command::BeginLoop
+            | Command::BeginTrim
+            | Command::BeginCopySample
+            | Command::ToggleSampleLoop
+            | Command::NormalizeSample
+            | Command::ReverseSample
+            | Command::FadeIn
+            | Command::FadeOut
+            | Command::ClearSampleData
+            | Command::AuditionSample
+            | Command::PreviewNote(_)
+            | Command::FieldPush(_)
+            | Command::FieldBackspace
+            | Command::FieldClear
+            | Command::FieldConfirm
+            | Command::ImportNudgeNote(_)
+            | Command::ImportNudgeFine(_)
+            | Command::ImportToggleNormalize
+            | Command::ImportToggleDither
+            | Command::ImportRateArm
+            | Command::ImportRateDigit(_)
+            | Command::ImportRateBackspace
+            | Command::ImportConfirm
+    )
+}
+
 /// Choosing a WAV to read, or a path to write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathPrompt {
@@ -159,6 +192,12 @@ pub(crate) fn field_command(key: super::app::Key) -> Option<Command> {
 impl App {
     /// Apply a sample-pane command. [`Err`] is a command this pane does not own.
     pub(crate) fn apply_sample(&mut self, command: Command) -> Result<Outcome, Command> {
+        if self.is_readonly() && tracked_edit(command) {
+            self.set_error(
+                "XM and IT songs are read-only. Sample editing is not supported yet. Ctrl-G still renders a WAV.",
+            );
+            return Ok(Outcome::None);
+        }
         match command {
             Command::BeginImport => {
                 self.open_path(PathKind::ImportWav);
@@ -544,8 +583,9 @@ impl App {
     }
 
     fn open_module_at(&mut self, path: PathBuf) -> Outcome {
-        match crate::Module::load(&path) {
-            Ok(module) => self.install_loaded(module, path),
+        match crate::open_path(&path) {
+            Ok(crate::Opened::Mod(module)) => self.install_loaded(module, path),
+            Ok(crate::Opened::Track(song)) => self.install_track(song, path),
             Err(err) => {
                 if let super::app::Overlay::Path(prompt) = &mut self.overlay {
                     prompt.error = Some(format!("Could not open {}: {err}", path.display()));
@@ -589,7 +629,12 @@ impl App {
                 let max_frames = (self.max_seconds * f64::from(config.sample_rate.max(1)))
                     .round()
                     .clamp(1.0, u32::MAX as f64) as usize;
-                match player::render_to_wav(&self.module, &path, config, max_frames) {
+                let rendered = if let Some(song) = &self.track {
+                    crate::track::render_to_wav(song, &path, config, max_frames)
+                } else {
+                    player::render_to_wav(&self.module, &path, config, max_frames)
+                };
+                match rendered {
                     Ok(stats) => {
                         let seconds = stats.frames as f64 / f64::from(stats.sample_rate.max(1));
                         self.message = Some(format!(
@@ -599,6 +644,12 @@ impl App {
                         ));
                     }
                     Err(err) => self.set_error(err.to_string()),
+                }
+                Outcome::None
+            }
+            PathKind::SaveModule if self.is_readonly() => {
+                if let super::app::Overlay::Path(prompt) = &mut self.overlay {
+                    prompt.error = Some(crate::track::SAVE_UNSUPPORTED.to_string());
                 }
                 Outcome::None
             }
@@ -984,7 +1035,9 @@ fn read_dir_rows(dir: &Path, kind: PathKind) -> Result<Vec<DirRow>, String> {
             let lower = name.to_ascii_lowercase();
             let hidden_type = match kind {
                 PathKind::ImportWav => !lower.ends_with(".wav"),
-                PathKind::OpenModule => !lower.ends_with(".mod"),
+                PathKind::OpenModule => {
+                    !lower.ends_with(".mod") && !lower.ends_with(".xm") && !lower.ends_with(".it")
+                }
                 PathKind::ExportSample | PathKind::ExportSong | PathKind::SaveModule => false,
             };
             if hidden_type {

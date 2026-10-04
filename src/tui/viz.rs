@@ -153,6 +153,10 @@ fn meter_for_row(row: usize, rows: usize) -> Option<usize> {
 fn meter_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
+    let channels = app.channel_count();
+    if channels > 4 {
+        return wide_meter_lines(rows, width, channels, app, theme);
+    }
     let mut lines = Vec::with_capacity(rows);
     for row in 0..rows {
         if let Some(channel) = meter_for_row(row, rows) {
@@ -162,6 +166,86 @@ fn meter_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
         }
     }
     lines
+}
+
+/// Two meters per row, at most eight, scrolled with the pattern cursor.
+///
+/// The spectrum pane keeps its height. A `.mod` never takes this path.
+fn wide_meter_lines(
+    rows: usize,
+    width: usize,
+    channels: usize,
+    app: &App,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let pairs = rows.min(4);
+    let window = pairs * 2;
+    let origin = app.channel_scroll.min(channels.saturating_sub(window)) / 2 * 2;
+    let mut lines = Vec::with_capacity(rows);
+    let blank = rows.saturating_sub(pairs);
+    for _ in 0..blank {
+        lines.push(Line::from(Span::styled(" ".repeat(width), theme.fill())));
+    }
+    for pair in 0..pairs {
+        let left = origin + pair * 2;
+        let right = left + 1;
+        lines.push(wide_meter_line(app, left, right, channels, width, theme));
+    }
+    lines
+}
+
+fn wide_meter_line(
+    app: &App,
+    left: usize,
+    right: usize,
+    channels: usize,
+    width: usize,
+    theme: Theme,
+) -> Line<'static> {
+    let half = width / 2;
+    let mut spans = meter_spans(app, left, channels, half, theme);
+    let used: usize = spans.iter().map(|span| span.content.chars().count()).sum();
+    if right < channels && used < width {
+        spans.extend(meter_spans(app, right, channels, width - used, theme));
+    }
+    Line::from(spans)
+}
+
+fn meter_spans(
+    app: &App,
+    channel: usize,
+    channels: usize,
+    width: usize,
+    theme: Theme,
+) -> Vec<Span<'static>> {
+    if channel >= channels || width == 0 {
+        return vec![Span::styled(" ".repeat(width), theme.fill())];
+    }
+    let (level, _) = app.viz.meter(channel);
+    let label = format!("{:>2}", channel + 1);
+    let color = theme
+        .channels
+        .get(channel % 4)
+        .copied()
+        .unwrap_or(theme.text);
+    let mut spans = vec![Span::styled(
+        label.clone(),
+        paint(color, theme.background, true),
+    )];
+    let bar_w = width.saturating_sub(label.chars().count());
+    if bar_w == 0 {
+        return spans;
+    }
+    let body = paint(color, theme.background, false);
+    let total = bar_w * 8;
+    let steps = quantize(level, total);
+    let mut chars = String::with_capacity(bar_w);
+    for cell in 0..bar_w {
+        let filled = steps.saturating_sub(cell * 8).min(8);
+        chars.push(HBLOCK[filled]);
+    }
+    spans.push(Span::styled(chars, body));
+    spans
 }
 
 fn paint_column(grid: &mut [Vec<(char, Style)>], column: usize, level: f32, theme: Theme) {
