@@ -13,6 +13,7 @@ use crate::module::{
     Cell, Module, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT, SAMPLE_NAME_LEN, TITLE_LEN,
 };
 use crate::player::{PlayerConfig, DEFAULT_SPEED, DEFAULT_TEMPO};
+use crate::viz::{VizMode, VizSnapshot, VizState};
 
 use super::sample::PathKind;
 use super::theme::Theme;
@@ -282,6 +283,8 @@ pub enum Command {
     GuardSave,
     /// Drop edits and run the pending file action.
     GuardDiscard,
+    /// Off, then the spectrum panel, then the full-screen scope.
+    CycleViz,
 }
 
 /// What the audio side should do after [`App::apply`].
@@ -421,6 +424,10 @@ pub struct App {
     clipboard: Clipboard,
     pub(crate) editor: Editor,
     quit: bool,
+    /// Spectrum, meters, or the scope. Off until F5.
+    pub(crate) viz_mode: VizMode,
+    /// Smoothed levels for the open visualization.
+    pub(crate) viz: VizState,
 }
 
 impl App {
@@ -466,7 +473,23 @@ impl App {
             clipboard: Clipboard::default(),
             editor: Editor::new(),
             quit: false,
+            viz_mode: VizMode::Off,
+            viz: VizState::new(),
         }
+    }
+
+    /// Fold one analysis window into the meters and the spectrum.
+    ///
+    /// Called from the UI thread. `snapshot` is `None` when the callback has
+    /// not published a new window. Passing the same generation twice does not
+    /// rerun the FFT.
+    pub fn tick_viz(&mut self, snapshot: Option<&VizSnapshot>, dt: f32) {
+        self.viz.tick(snapshot, dt);
+    }
+
+    /// Which visualization is showing.
+    pub fn viz_mode(&self) -> VizMode {
+        self.viz_mode
     }
 
     /// Snap the view to the row the replayer is mixing.
@@ -618,6 +641,15 @@ impl App {
                     self.focus = Focus::Pattern;
                     self.field = Field::Note;
                 }
+                Outcome::None
+            }
+            Command::CycleViz => {
+                self.viz_mode = self.viz_mode.cycle();
+                self.set_message(match self.viz_mode {
+                    VizMode::Off => "Visualization off",
+                    VizMode::Panel => "Spectrum and meters (F5 for scope)",
+                    VizMode::Scope => "Scope (F5 to hide)",
+                });
                 Outcome::None
             }
             Command::Octave(delta) => {
@@ -1346,6 +1378,7 @@ fn global_key(key: Key) -> Option<Command> {
         Key::F(2) => Some(Command::Octave(1)),
         Key::F(3) => Some(Command::Step(-1)),
         Key::F(4) => Some(Command::Step(1)),
+        Key::F(5) => Some(Command::CycleViz),
         Key::Alt('1') => Some(Command::ToggleMute(0)),
         Key::Alt('2') => Some(Command::ToggleMute(1)),
         Key::Alt('3') => Some(Command::ToggleMute(2)),
@@ -1798,5 +1831,20 @@ mod tests {
         app.apply(Command::EnterNote(0));
         assert!(matches!(app.apply(Command::Save), Outcome::None));
         assert!(matches!(app.overlay, Overlay::Path(_)));
+    }
+
+    #[test]
+    fn f5_cycles_the_visualization_while_editing() {
+        let mut app = App::new(Module::new(Tag::Mk));
+        assert_eq!(app.viz_mode(), VizMode::Off);
+        assert_eq!(command_for(&app, Key::F(5)), Some(Command::CycleViz));
+        app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Panel);
+        app.apply(Command::ToggleEdit);
+        assert_eq!(command_for(&app, Key::F(5)), Some(Command::CycleViz));
+        app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Scope);
+        app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Off);
     }
 }

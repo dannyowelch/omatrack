@@ -16,9 +16,11 @@ pub(super) fn mix_frames(
     interpolation: Interpolation,
     separation: u8,
     output: &mut [i16],
-) {
+) -> [u16; CHANNELS] {
     let separation = separation.min(100);
     let frames = output.len() / 2;
+    let mut peaks = [0u16; CHANNELS];
+    let limit = u32::from(super::CHANNEL_PEAK_SCALE);
     for frame in 0..frames {
         let mut left = 0i32;
         let mut right = 0i32;
@@ -40,6 +42,10 @@ pub(super) fn mix_frames(
             let volume = i32::from(voice.audible_volume);
             if !voice.muted && volume != 0 && value != 0 {
                 let amp = value * volume;
+                let mag = amp.unsigned_abs().min(limit);
+                if mag > u32::from(peaks[index]) {
+                    peaks[index] = mag as u16;
+                }
                 let (gain_l, gain_r) = gains(index, separation);
                 left += amp * gain_l / 100;
                 right += amp * gain_r / 100;
@@ -50,6 +56,7 @@ pub(super) fn mix_frames(
         output[base] = clamp_i16(left);
         output[base + 1] = clamp_i16(right);
     }
+    peaks
 }
 
 fn voice_sample<'a>(

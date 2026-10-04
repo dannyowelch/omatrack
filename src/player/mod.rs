@@ -51,6 +51,11 @@ use tables::{break_row, lfo, nearest_period, semitone_period, signed_finetune};
 
 /// Output rate used by [`PlayerConfig::default`] and by `--render`.
 pub const DEFAULT_SAMPLE_RATE: u32 = 44_100;
+/// `|sample byte| × volume` at which a channel meter reads full.
+///
+/// A stored sample is signed 8-bit, so −128 at volume 64 is 8192. [`Playback::channel_peaks`]
+/// uses this scale. Muted channels and a volume of 0 stay at 0.
+pub const CHANNEL_PEAK_SCALE: u16 = 8192;
 /// Ticks per row until an `Fxx` command changes it.
 pub const DEFAULT_SPEED: u8 = 6;
 /// CIA tempo until an `Fxx` command changes it.
@@ -250,6 +255,8 @@ pub struct Playback {
     pending_jump: Option<u8>,
     visited: [bool; ORDER_LEN],
     voices: [Voice; CHANNELS],
+    /// Peak `|sample × volume|` of each channel over the last [`Self::render`].
+    frame_peaks: [u16; CHANNELS],
 }
 
 impl Playback {
@@ -276,6 +283,7 @@ impl Playback {
             pending_jump: None,
             visited: [false; ORDER_LEN],
             voices: std::array::from_fn(|_| Voice::new()),
+            frame_peaks: [0; CHANNELS],
         }
     }
 
@@ -325,6 +333,7 @@ impl Playback {
     /// playback halted or, when [`Self::set_stop_on_loop`] is set, because the
     /// song looped. An odd trailing sample is ignored.
     pub fn render(&mut self, module: &Module, output: &mut [i16]) -> usize {
+        self.frame_peaks = [0; CHANNELS];
         let frames = output.len() / 2;
         if frames == 0 {
             return 0;
@@ -340,7 +349,7 @@ impl Playback {
             }
             let n = (frames - filled).min(self.samples_left as usize);
             let end = (filled + n) * 2;
-            mix::mix_frames(
+            let peaks = mix::mix_frames(
                 module,
                 &mut self.voices,
                 self.config.sample_rate.max(1),
@@ -348,10 +357,24 @@ impl Playback {
                 self.config.stereo_separation,
                 &mut output[filled * 2..end],
             );
+            for (slot, peak) in self.frame_peaks.iter_mut().zip(peaks) {
+                if peak > *slot {
+                    *slot = peak;
+                }
+            }
             filled += n;
             self.samples_left -= u32::try_from(n).unwrap_or(u32::MAX);
         }
         filled
+    }
+
+    /// Peak `|sample × volume|` of each channel over the last [`Self::render`].
+    ///
+    /// Index 0 is channel 1. The value is 0 when that channel is muted, its
+    /// audible volume is 0, or it did not produce a sample in the buffer.
+    /// [`CHANNEL_PEAK_SCALE`] is a full-scale byte at volume 64.
+    pub fn channel_peaks(&self) -> [u16; CHANNELS] {
+        self.frame_peaks
     }
 
     /// Order-list position, `0 .. song length`.

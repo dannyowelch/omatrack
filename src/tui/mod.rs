@@ -8,6 +8,7 @@ mod app;
 mod render;
 mod sample;
 mod theme;
+mod viz;
 
 pub use app::{command_for, App, Command, Focus, Key, Outcome};
 pub use render::draw;
@@ -47,7 +48,7 @@ use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -63,6 +64,7 @@ use crate::config::{self, ThemeRequest};
 use crate::error::Error;
 use crate::module::Module;
 use crate::player::PlayerConfig;
+use crate::viz::VizMode;
 
 use self::app::{Followup, Key as AppKey};
 use self::sample::PathKind;
@@ -94,6 +96,8 @@ pub struct Session {
     pub step: u8,
     /// Shown once, in the error color. Config and theme warnings land here.
     pub notice: Option<String>,
+    /// `last_file` path. Open, save, and new update it.
+    pub state_path: PathBuf,
 }
 
 /// Show `session` until the user quits.
@@ -124,6 +128,7 @@ pub fn run(session: Session) -> Result<(), Error> {
         octave,
         step,
         notice,
+        state_path,
     } = session;
     let mut app = App::open(module, path);
     app.set_theme(theme, theme_label);
@@ -136,7 +141,15 @@ pub fn run(session: Session) -> Result<(), Error> {
     let home = config::home_dir();
     let state = config::xdg_state_home();
     let mut watch = ThemeWatch::new(theme_watch);
+    let mut last_draw = Instant::now();
     loop {
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(last_draw).as_secs_f32();
+        last_draw = now;
+        if app.viz_mode != VizMode::Off {
+            let snapshot = audio.visualization();
+            app.tick_viz(snapshot.as_ref(), dt);
+        }
         if reload.swap(false, Ordering::Relaxed) || watch.changed() {
             let loaded = theme::resolve(theme_request, color_depth, &home, state.as_deref());
             apply_theme(&mut app, &mut watch, loaded);
@@ -157,12 +170,18 @@ pub fn run(session: Session) -> Result<(), Error> {
         terminal
             .draw(|frame| draw(frame, &mut app))
             .map_err(Error::Terminal)?;
-        let wait = if app.playing { 20 } else { 200 };
+        let wait = if app.playing {
+            20
+        } else if app.viz_mode == VizMode::Scope {
+            33
+        } else {
+            200
+        };
         if event::poll(Duration::from_millis(wait)).map_err(Error::Terminal)? {
             match event::read().map_err(Error::Terminal)? {
                 Event::Key(key) => {
                     if let Some(command) = map_key(key).and_then(|key| command_for(&app, key)) {
-                        handle_command(&mut app, &mut audio, command);
+                        handle_command(&mut app, &mut audio, command, &state_path);
                     }
                 }
                 Event::Resize(_, _) => {}
@@ -200,7 +219,7 @@ fn install_reload_flag() -> Arc<AtomicBool> {
     flag
 }
 
-fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
+fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, state_path: &Path) {
     let was_playing = app.playing;
     let outcome = app.apply(command);
     match outcome {
@@ -233,13 +252,19 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
             }
         }
         Outcome::Save | Outcome::SaveAndQuit => {
-            if persist(app) {
-                apply_followup(app, audio);
+            if persist(app, state_path) {
+                apply_followup(app, audio, state_path);
             }
         }
-        Outcome::Saved => apply_followup(app, audio),
+        Outcome::Saved => {
+            if !app.path.as_os_str().is_empty() {
+                let _ = crate::state::write(state_path, &app.path);
+            }
+            apply_followup(app, audio, state_path);
+        }
         Outcome::DocumentReplaced => {
             audio.stop();
+            remember_document(app, state_path);
         }
         Outcome::Audition { slot, period } => {
             if let Err(err) = audio.audition(&app.module, slot, period) {
@@ -250,13 +275,22 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
     }
 }
 
-fn persist(app: &mut App) -> bool {
+fn remember_document(app: &App, state_path: &Path) {
+    if app.path.as_os_str().is_empty() {
+        let _ = crate::state::clear(state_path);
+    } else {
+        let _ = crate::state::write(state_path, &app.path);
+    }
+}
+
+fn persist(app: &mut App, state_path: &Path) -> bool {
     if app.path.as_os_str().is_empty() {
         app.prompt_path(PathKind::SaveModule);
         return false;
     }
     match app.save() {
         Ok(()) => {
+            let _ = crate::state::write(state_path, &app.path);
             let name = app
                 .path
                 .file_name()
@@ -273,7 +307,7 @@ fn persist(app: &mut App) -> bool {
     }
 }
 
-fn apply_followup(app: &mut App, audio: &mut AudioOutput) {
+fn apply_followup(app: &mut App, audio: &mut AudioOutput, state_path: &Path) {
     match app.take_followup() {
         Some(Followup::Quit) => {
             audio.stop();
@@ -282,6 +316,7 @@ fn apply_followup(app: &mut App, audio: &mut AudioOutput) {
         Some(Followup::New) => {
             let _ = app.install_blank();
             audio.stop();
+            let _ = crate::state::clear(state_path);
         }
         Some(Followup::Open) => app.prompt_path(PathKind::OpenModule),
         None => {}

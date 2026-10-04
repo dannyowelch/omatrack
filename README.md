@@ -2,7 +2,7 @@
 
 Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
 
-It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it starts an empty module. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them.
+It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. F5 cycles a spectrum and channel meters, then a full-screen scope.
 
 Colors follow the active Omarchy theme when one is installed. Otherwise the screen is the built-in ProTracker blue. `--theme` can force either of those, a green phosphor palette, or plain ANSI colors that track the terminal's own theme.
 
@@ -10,7 +10,7 @@ Colors follow the active Omarchy theme when one is installed. Otherwise the scre
 
 ![The same song painted from an Omarchy Tokyo Night palette](docs/screenshots/omarchy.png)
 
-The pictures are the tracker buffer drawn with a monospace font. `cargo run --example screenshot -- out.cells pattern` writes the cells (`edit`, `help`, `file`, `phosphor`, and `omarchy` are the other views).
+The pictures are the tracker buffer drawn with a monospace font. `cargo run --example screenshot -- out.cells pattern` writes the cells (`edit`, `help`, `file`, `phosphor`, `omarchy`, `viz`, and `scope` are the other views).
 
 ## Install
 
@@ -21,14 +21,14 @@ Rust 1.83 or newer is required. The committed `Cargo.lock` pins a few transitive
 ```bash
 cargo install --locked --path .
 # or, once a release tag exists:
-cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.1.0
+cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.2.0
 ```
 
 A tagged release also attaches `omatrack-x86_64-unknown-linux-gnu` to the GitHub release. Put that binary on `PATH`.
 
 ### Omarchy / Arch
 
-The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.1.0`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` in the recipe is the checksum of that tarball. Install with:
+The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.2.0`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` is `SKIP` until that tag exists; replace it with the checksum of the release tarball after tagging. Install with:
 
 ```bash
 cd packaging/arch
@@ -49,7 +49,7 @@ cargo build --release --locked
 ```bash
 cargo build --release
 cargo run -- path/to/song.mod
-cargo run --                 # new empty module
+cargo run --                 # reopen the last module, or start empty
 ```
 
 Copyrighted modules do not belong in the repo. The tests load freely licensed fixtures from `tests/data/` (CC0, public domain, CC BY 4.0, and BSD-3-Clause; see `tests/data/README.md` and `tests/data/ATTRIBUTION.txt`). Other `*.mod` paths stay gitignored. Generate a small original song and open it:
@@ -81,6 +81,7 @@ Tab              pattern, samples, order
 1 2 3 4          mute that channel (Alt-1..4 while editing)
 Up/Down, j/k     move the cursor
 Left/Right, h/l  change channel (pattern view)
+F5               cycle visualization: off, spectrum, scope
 PgUp/PgDn        page
 Home/End         first or last row, or sample
 [ ]              previous / next order position
@@ -96,6 +97,7 @@ Home/End         first or last row, or sample
 `~/.config/omatrack/config.toml`, or `$XDG_CONFIG_HOME/omatrack/config.toml` when that variable is set. `--config` points somewhere else. A missing file uses the defaults. A file that is not valid for the small TOML subset this program reads is ignored, and the reason is shown on the status line; omatrack still starts. A bad value keeps that setting's default and keeps the rest of the file. Unknown keys are ignored. The example, which is also what the package installs, is `packaging/config.toml`:
 
 ```toml
+reopen_last = true
 theme = "auto"
 
 [audio]
@@ -111,6 +113,8 @@ step = 1
 
 `--rate`, `--interpolate`, `--separation`, and `--max-seconds` override the audio section for `--render`. Live playback asks the device for `sample_rate` and uses the device's own rate when it cannot play that one. Interpolation and stereo separation still apply. Sample audition stays centered.
 
+`reopen_last` (default `true`) loads the last module when the command line does not name one. `--no-reopen` skips that for one launch. A file argument always wins. The path is not stored in this file: it lives at `$XDG_STATE_HOME/omatrack/last_file`, or `~/.local/state/omatrack/last_file`. Open, save, and save as update it. New clears it. A missing, unreadable, or invalid remembered file starts an empty module and puts a short reason on the status line.
+
 ### Themes
 
 How the palette is found, from the current Omarchy tree (`docs/theming.md` and `bin/omarchy-theme-set` / `bin/omarchy-theme-color` in [basecamp/omarchy](https://github.com/basecamp/omarchy)):
@@ -125,7 +129,7 @@ How the palette is found, from the current Omarchy tree (`docs/theming.md` and `
 
 ![Phosphor, the other built-in palette](docs/screenshots/phosphor.png)
 
-Roles: background and foreground are the theme's own. The cursor is `bright_foreground` on the background, which is what Omarchy's terminal templates use. Edit mode uses the accent, so it stays distinct from that cursor. The playback row mixes the background toward green. Channel headers are red, yellow, green, and blue. The waveform is cyan. Errors are red.
+Roles: background and foreground are the theme's own. The cursor is `bright_foreground` on the background, which is what Omarchy's terminal templates use. Edit mode uses the accent, so it stays distinct from that cursor. The playback row mixes the background toward green. Channel headers are red, yellow, green, and blue. The waveform and the spectrum bars are cyan. Spectrum and meter peak marks are yellow. Errors are red.
 
 Truecolor (`ESC[38;2;…m`) is used when `COLORTERM` is `truecolor` or `24bit`, or when `TERM` names kitty, alacritty, or ghostty. A 256-color `TERM` gets the xterm cube. Anything else, including a dumb terminal, gets the 16 ANSI colors. `OMATRACK_COLOR=truecolor|256|16` overrides that. Named ANSI colors, including the whole `terminal` theme, are left as indexes so they keep tracking the terminal.
 
@@ -187,6 +191,16 @@ Import asks for a path (type one, or move through the directory list) and then h
 Export writes unsigned 8-bit mono at the sample's C-2 playback rate, or at a rate you type (Tab moves to the rate field). `p` auditions the sample through the same mixer as note preview, centered, for a few seconds. The sample list draws a one-line waveform with `|` at the loop points.
 
 If no output device can be opened, the tracker stays up and the transport bar names PipeWire, PulseAudio, and ALSA. `--render` never touches the device. A device that cannot play the configured sample rate keeps its own rate.
+
+## Visualization
+
+F5 cycles three views: off, a spectrum panel, and a full-screen scope. The same key works while editing. The transport bar says `Viz` or `Scope` while one is up.
+
+The panel sits under the sample list and above the transport bar, so the pattern keeps its rows. It draws a log-spaced spectrum of the final stereo mix (mono average, Hann window, 512-point FFT) with Unicode block bars, smoothed and peak-held, plus four channel meters. Each meter is that Amiga channel's peak `|sample × volume|` over the latest mix window, so a mute or a volume of 0 reads empty. Peak marks hold, then fall. The panel needs a terminal about 28 rows tall (80×24 keeps the pattern and hides the panel). F5 still reaches the scope, which fits the usual view.
+
+The scope is a braille canvas (U+2800). It draws a Lissajous trace of the stereo mix and four diamonds, one per channel, that grow and orbit with that channel's level. It repaints with the UI, about 30 frames per second while it is the thing on screen and playback is stopped, and with the playhead while a song is running.
+
+The audio callback never waits on the UI. It publishes a fixed window of the mix and the four peaks through atomics. The FFT, the bar smoothing, and the braille drawing run on the UI thread. `--render` does not draw either view. The same analysis functions are what the unit tests call.
 
 ## Playback
 
@@ -268,6 +282,7 @@ A short file, a bad tag, or a song length outside `1..=128` returns an error. 15
 src/lib.rs        library root
 src/main.rs       arguments, exit codes, terminal startup
 src/config.rs     ~/.config/omatrack/config.toml
+src/state.rs      last-opened module path
 src/omarchy.rs    active Omarchy palette
 src/module.rs     Module, Pattern, Cell, Sample
 src/modfile.rs    .mod parser and writer
@@ -277,6 +292,7 @@ src/convert.rs    WAV PCM to signed 8-bit mono
 src/sample_edit.rs volume, loop, trim, fades, copy
 src/waveform.rs   block waveform for the sample list
 src/player/       tick clock, effects, four-channel mixer
+src/viz/          FFT, meters, lock-free mix window, braille scope
 src/audio.rs      cpal output and note/sample preview
 src/wav.rs        WAV reader, 16-bit stereo writer, 8-bit mono writer
 src/demo.rs       the original showcase module
@@ -294,6 +310,7 @@ packaging/        PKGBUILD, desktop entry, man page, example config
 | M3 | note entry, copy/paste, undo, ProTracker-style keys | `edit` |
 | M4 | WAV import/export and sample editing on that same undo stack | `convert`, `sample_edit`, the sample pane |
 | M5 | Omarchy theme, config file, Arch `PKGBUILD`, file menu | `omarchy`, `config`, `packaging/` |
+| M6 | Reopen the last module; spectrum, meters, and scope | `state`, `viz`, the audio callback |
 
 Ctrl-S writes the module with the same writer the round-trip tests use.
 

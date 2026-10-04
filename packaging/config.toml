@@ -6,6 +6,12 @@
 # instead of exiting. Unknown keys are ignored. A bad value keeps that
 # setting's default and keeps the rest of the file.
 #
+# Reopen the last module when omatrack is started with no file argument.
+# The path is kept in $XDG_STATE_HOME/omatrack/last_file (or
+# ~/.local/state/omatrack/last_file), not in this file. --no-reopen skips
+# it for one launch. A missing or unreadable module starts empty.
+reopen_last = true
+
 # theme: auto | omarchy | protracker | phosphor | terminal
 #   auto       use the active Omarchy theme, or protracker when it is absent
 #   omarchy    require the Omarchy theme; protracker if none is installed
