@@ -1,6 +1,6 @@
 pkgbase = omatrack
 	pkgdesc = ProTracker-style music tracker for the terminal
-	pkgver = 0.2.3
+	pkgver = 0.2.4
 	pkgrel = 1
 	url = https://github.com/dannyowelch/omatrack
 	arch = x86_64
@@ -14,7 +14,7 @@ pkgbase = omatrack
 	optdepends = ghostty: terminal for the desktop entry
 	optdepends = alacritty: terminal for the desktop entry
 	optdepends = kitty: terminal for the desktop entry
-	source = omatrack-0.2.3.tar.gz::https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.2.3.tar.gz
-	sha256sums = fd68995b548405220f9191812af7b35ffa121e84e21ea06c07ade2c4e4412735
+	source = omatrack-0.2.4.tar.gz::https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.2.4.tar.gz
+	sha256sums = SKIP
 
 pkgname = omatrack
