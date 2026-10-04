@@ -15,8 +15,10 @@ use std::process::ExitCode;
 
 use omatrack::demo;
 use omatrack::omarchy;
+use omatrack::player::{Playback, PlayerConfig};
 use omatrack::tui::{draw, App, Command, Theme};
 use omatrack::viz::{VizSnapshot, WINDOW};
+use omatrack::Module;
 use ratatui::backend::TestBackend;
 use ratatui::style::Color;
 use ratatui::Terminal;
@@ -25,7 +27,7 @@ fn main() -> ExitCode {
     let mut args = env::args().skip(1);
     let Some(path) = args.next() else {
         eprintln!(
-            "usage: screenshot <out.cells> [pattern|edit|help|file|phosphor|omarchy|viz|scope]"
+            "usage: screenshot <out.cells> [pattern|edit|help|file|phosphor|omarchy|viz|scope|viz-matte|viz-module]"
         );
         return ExitCode::from(2);
     };
@@ -78,6 +80,26 @@ fn render(path: &PathBuf, mode: &str) -> io::Result<()> {
             app.apply(Command::CycleViz);
             seed_viz(&mut app);
         }
+        "viz-matte" => {
+            let palette = omarchy::palette_from_colors_toml(MATTE_BLACK).expect("palette");
+            app.set_theme(Theme::from_palette(&palette), "matte-black");
+            app.apply(Command::TogglePlay);
+            app.apply(Command::CycleViz);
+            seed_viz(&mut app);
+        }
+        "viz-module" => {
+            let palette = omarchy::palette_from_colors_toml(MATTE_BLACK).expect("palette");
+            let path =
+                PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/11thhour_TDK_CCBY.mod");
+            let module = Module::load(&path).map_err(io::Error::other)?;
+            app = App::new(module.clone());
+            app.set_theme(Theme::from_palette(&palette), "matte-black");
+            app.apply(Command::TogglePlay);
+            app.apply(Command::CycleViz);
+            // Order 6 is the passage in the reported screenshot (pattern 4).
+            // A couple of seconds so the automatic gain has settled on this passage.
+            feed_module(&mut app, &module, 6, 0, 220);
+        }
         other => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -87,7 +109,8 @@ fn render(path: &PathBuf, mode: &str) -> io::Result<()> {
     }
 
     let (width, height) = match mode {
-        "viz" => (110, 40),
+        "viz" | "viz-matte" => (110, 40),
+        "viz-module" => (120, 42),
         "scope" => (100, 36),
         _ => (100, 32),
     };
@@ -134,6 +157,31 @@ fn seed_viz(app: &mut App) {
     }
 }
 
+/// Play `module` from `order`/`row` and fold each analysis window into `app`.
+fn feed_module(app: &mut App, module: &Module, order: usize, row: usize, windows: usize) {
+    let mut playback = Playback::new(PlayerConfig::default());
+    playback.start(module, order, row);
+    let rate = playback.sample_rate().max(1);
+    let dt = WINDOW as f32 / rate as f32;
+    let mut pcm = vec![0i16; WINDOW * 2];
+    for generation in 1..=windows {
+        let wrote = playback.render(module, &mut pcm);
+        if wrote == 0 {
+            break;
+        }
+        let mut stereo = [0i16; WINDOW * 2];
+        let copy = wrote.min(WINDOW) * 2;
+        stereo[..copy].copy_from_slice(&pcm[..copy]);
+        let snap = VizSnapshot {
+            stereo,
+            peaks: playback.channel_peaks(),
+            rate,
+            gen: generation as u64,
+        };
+        app.tick_viz(Some(&snap), dt);
+    }
+}
+
 fn hex(color: Color) -> String {
     let (r, g, b) = match color {
         Color::Rgb(r, g, b) => (r, g, b),
@@ -158,6 +206,29 @@ fn hex(color: Color) -> String {
     };
     format!("#{r:02x}{g:02x}{b:02x}")
 }
+
+const MATTE_BLACK: &str = "\
+accent = \"#e68e0d\"\n\
+cursor = \"#eaeaea\"\n\
+foreground = \"#bebebe\"\n\
+background = \"#121212\"\n\
+color0 = \"#333333\"\n\
+color1 = \"#D35F5F\"\n\
+color2 = \"#FFC107\"\n\
+color3 = \"#b91c1c\"\n\
+color4 = \"#e68e0d\"\n\
+color5 = \"#D35F5F\"\n\
+color6 = \"#bebebe\"\n\
+color7 = \"#bebebe\"\n\
+color8 = \"#8a8a8d\"\n\
+color9 = \"#B91C1C\"\n\
+color10 = \"#FFC107\"\n\
+color11 = \"#b90a0a\"\n\
+color12 = \"#f59e0b\"\n\
+color13 = \"#B91C1C\"\n\
+color14 = \"#eaeaea\"\n\
+color15 = \"#ffffff\"\n\
+";
 
 const TOKYO: &str = "\
 background = \"#1a1b26\"\n\
