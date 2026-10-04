@@ -1,10 +1,12 @@
 # Maintainer: Omatrack contributors <https://github.com/dannyowelch/omatrack>
 #
-# Builds from the tagged GitHub release tarball. sha256sums is the checksum of
-# https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.2.1.tar.gz
+# Builds from the tagged GitHub release tarball.
+# https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.2.2.tar.gz
+# sha256sums is SKIP until that tag exists. After tagging, replace SKIP with
+# the checksum of the release tarball (`sha256sum` of the downloaded archive).
 
 pkgname=omatrack
-pkgver=0.2.1
+pkgver=0.2.2
 pkgrel=1
 pkgdesc='ProTracker-style music tracker for the terminal'
 arch=('x86_64' 'aarch64')
@@ -16,7 +18,7 @@ optdepends=('ghostty: terminal for the desktop entry'
             'alacritty: terminal for the desktop entry'
             'kitty: terminal for the desktop entry')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('64cdd8d992410721fcdd55f3471d331d6ace07f3462fe971c008080c09ba3478')
+sha256sums=('SKIP')
 
 prepare() {
   cd "$pkgname-$pkgver"
