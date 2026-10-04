@@ -4,16 +4,39 @@
 use std::f32::consts::TAU;
 
 /// Multiply `samples` by a periodic Hann window.
-pub fn apply_hann(samples: &mut [f32]) {
+///
+/// Returns the sum of the window coefficients. A length below 2 is left
+/// unchanged and the sum is the length. The spectrum divides by this sum so a
+/// full-scale sine still peaks near 1.0; the rectangular-window scale in
+/// [`magnitudes`] would otherwise leave a Hann-windowed sine about 6 dB down.
+pub fn apply_hann(samples: &mut [f32]) -> f32 {
     let n = samples.len();
     if n < 2 {
-        return;
+        return n as f32;
     }
     let scale = TAU / n as f32;
+    let mut sum = 0.0f32;
     for (index, sample) in samples.iter_mut().enumerate() {
         let window = 0.5 - 0.5 * (scale * index as f32).cos();
+        sum += window;
         *sample *= window;
     }
+    sum
+}
+
+/// [`magnitudes`] corrected for an analysis window that summed to `window_sum`.
+///
+/// [`magnitudes`] assumes a rectangular window (sum = length). Passing the sum
+/// from [`apply_hann`] restores a bin-centered full-scale sine to about 1.0.
+/// A non-positive sum returns the rectangular magnitudes unchanged.
+pub fn windowed_magnitudes(input: &[f32], window_sum: f32) -> Vec<f32> {
+    let mags = magnitudes(input);
+    let n = input.len() as f32;
+    if !window_sum.is_finite() || window_sum <= 1.0e-6 || n < 2.0 {
+        return mags;
+    }
+    let correction = n / window_sum;
+    mags.into_iter().map(|value| value * correction).collect()
 }
 
 /// Single-sided magnitudes of `input`.
@@ -124,6 +147,26 @@ mod tests {
             .map(|(index, _)| index)
             .unwrap();
         assert_eq!(peak, 13);
+    }
+
+    #[test]
+    fn hann_correction_puts_a_full_scale_sine_back_near_one() {
+        let n = 256;
+        let mut tone = sine(n, 17, 1.0);
+        let sum = apply_hann(&mut tone);
+        assert!((sum - n as f32 * 0.5).abs() < 0.01, "window sum {sum}");
+        let raw = magnitudes(&tone);
+        let corrected = windowed_magnitudes(&tone, sum);
+        assert!(
+            raw[17] < 0.65,
+            "uncorrected Hann peak should sit near 0.5, got {}",
+            raw[17]
+        );
+        assert!(
+            (0.9..1.1).contains(&corrected[17]),
+            "corrected peak {}",
+            corrected[17]
+        );
     }
 
     #[test]
