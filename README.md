@@ -1,6 +1,6 @@
 # Omatrack
 
-Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
+Omatrack is a terminal music tracker for ProTracker `.mod`, FastTracker 2 `.xm`, and Impulse Tracker `.it`, written in Rust for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland). It also runs in any terminal that can host a normal Rust binary.
 
 It loads a 4-channel `.mod`, shows it, plays it, and edits it. It also loads and plays FastTracker 2 `.xm` and Impulse Tracker `.it` files (detected by header, not just by extension). Those songs are read-only: the pattern editor will not change them, and saving them is not supported yet, so the original file is left untouched. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. The spectrum is up at launch. F5 cycles that view, then a full-screen scope, then off.
 
@@ -21,14 +21,14 @@ Rust 1.83 or newer is required. The committed `Cargo.lock` pins a few transitive
 ```bash
 cargo install --locked --path .
 # or, once a release tag exists:
-cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.2.6
+cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.3.0
 ```
 
 A tagged release also attaches `omatrack-x86_64-unknown-linux-gnu` to the GitHub release. Put that binary on `PATH`.
 
 ### Omarchy / Arch
 
-The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.2.6`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` in the recipe is the checksum of that tarball. Install with:
+The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.3.0`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` is `SKIP` until that tag exists; replace it with the checksum of the release tarball after tagging. Install with:
 
 ```bash
 cd packaging/arch
@@ -54,7 +54,7 @@ cargo run -- path/to/song.it
 cargo run --                 # reopen the last module, or start empty
 ```
 
-Copyrighted modules do not belong in the repo. The tests load freely licensed fixtures from `tests/data/` (CC0, public domain, CC BY 4.0, and BSD-3-Clause; see `tests/data/README.md` and `tests/data/ATTRIBUTION.txt`). Other `*.mod` paths stay gitignored. Generate a small original song and open it:
+Copyrighted modules do not belong in the repo. The tests load freely licensed fixtures from `tests/data/` (CC0, public domain, CC BY 4.0, and BSD-3-Clause; see `tests/data/README.md` and `tests/data/ATTRIBUTION.txt`). Other `*.mod`, `*.xm`, and `*.it` paths stay gitignored. Generate a small original song and open it:
 
 ```bash
 cargo run --example write_showcase -- /tmp/omatrack-showcase.mod

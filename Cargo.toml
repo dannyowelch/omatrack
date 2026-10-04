@@ -1,9 +1,9 @@
 [package]
 name = "omatrack"
-version = "0.2.6"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.83"
-description = "ProTracker-style music tracker for Omarchy Linux"
+description = "Terminal tracker for .mod, .xm, and .it modules"
 readme = "README.md"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/dannyowelch/omatrack"
