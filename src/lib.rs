@@ -13,6 +13,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audio;
+pub mod convert;
 pub mod demo;
 pub mod edit;
 pub mod error;
@@ -20,13 +21,16 @@ pub mod modfile;
 pub mod module;
 pub mod notes;
 pub mod player;
+pub mod sample_edit;
 pub mod tui;
 pub mod wav;
+pub mod waveform;
 
+pub use convert::{c2_rate, import_pcm, ImportOptions, ImportedSample};
 pub use edit::Editor;
 pub use error::Error;
 pub use modfile::{HEADER_LEN, PATTERN_BYTES};
 pub use module::{Cell, Module, Pattern, Sample, Tag, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT};
 pub use notes::{effect_description, format_period};
 pub use player::{Playback, PlayerConfig, RenderStats};
-pub use wav::{wav_bytes, write_wav};
+pub use wav::{decode_wav, encode_mono8_wav, wav_bytes, write_mono8_wav, write_wav, DecodedWav};

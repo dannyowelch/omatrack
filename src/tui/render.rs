@@ -5,11 +5,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
+use crate::convert::rate_for_note;
 use crate::edit::Field;
 use crate::module::{Cell, Sample, CHANNELS, SAMPLE_NAME_LEN, TITLE_LEN};
 use crate::notes::{effect_description, format_finetune, format_period};
+use crate::waveform::{marker_row, waveform_row};
 
 use super::app::{App, Focus, Overlay, TextTarget};
+use super::sample::{FieldKind, FieldPrompt, ImportPrompt, PathKind, PathPrompt};
 use super::theme::{paint, Theme};
 
 const MIN_WIDTH: u16 = 76;
@@ -37,6 +40,10 @@ const HELP_LINES: &[&str] = &[
     "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
     "Ctrl-T edits the title. On Samples, R renames the instrument.",
     "A * after the title means unsaved. Quit asks before discarding it.",
+    "Samples: i import WAV, o export WAV, Ctrl-G render the song.",
+    "v volume  f finetune  l loop  / toggle loop  t trim  n normalize",
+    "w reverse (R still renames)  a/z fade  c clear  y copy to a slot",
+    "p previews at the note from - and =. u undoes, same stack as Ctrl-Z.",
 ];
 
 /// Draw the viewer into `frame`.
@@ -55,7 +62,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 
     let row_window = usize::from(regions.pattern.height.saturating_sub(2)).saturating_sub(2);
-    let sample_window = usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1);
+    let wave_lines = if app.focus == Focus::Samples { 2 } else { 0 };
+    let sample_window =
+        usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1 + wave_lines);
     app.reconcile_scroll(row_window, sample_window);
 
     draw_song(frame, regions.song, app, theme);
@@ -101,6 +110,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             );
         }
         Overlay::None | Overlay::Help => {}
+        Overlay::Path(prompt) => draw_path_prompt(frame, area, prompt, theme),
+        Overlay::Import(prompt) => draw_import_prompt(frame, area, prompt, theme),
+        Overlay::Field(prompt) => draw_field_prompt(frame, area, prompt, theme),
     }
 }
 
@@ -276,10 +288,28 @@ fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let block = pane("Samples", focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
-    let sample_window = inner_h.saturating_sub(1);
-
     let mut lines = Vec::new();
-    if inner_h > 0 {
+    if focused && inner_h > 2 && inner_w > 0 {
+        let sample = &app.module.samples[app.sample];
+        lines.push(styled(
+            waveform_row(&sample.data, inner_w),
+            paint(theme.note, theme.background, false),
+        ));
+        let mut points = Vec::new();
+        if sample.loops() {
+            let start = usize::from(sample.loop_start) * 2;
+            let end = start.saturating_add(usize::from(sample.loop_length) * 2);
+            points.push(start);
+            points.push(end.min(sample.data.len()));
+        }
+        lines.push(styled(
+            marker_row(sample.data.len(), inner_w, &points),
+            paint(theme.effect, theme.background, false),
+        ));
+    }
+    let sample_window = inner_h.saturating_sub(lines.len() + 1);
+
+    if inner_h > lines.len() {
         lines.push(styled(sample_header(), theme.dim()));
     }
     let start = app.sample_offset;
@@ -557,6 +587,9 @@ fn status_text(app: &App) -> String {
             return message.clone();
         }
     }
+    if let Some(notice) = &app.notice {
+        return notice.clone();
+    }
     let Some(cell) = app.current_cell() else {
         return "Pattern is not in the file.".to_string();
     };
@@ -662,6 +695,155 @@ fn styled(text: String, style: ratatui::style::Style) -> Line<'static> {
 
 fn clip(text: String, width: u16) -> String {
     text.chars().take(usize::from(width)).collect()
+}
+
+fn draw_path_prompt(frame: &mut Frame, area: Rect, prompt: &PathPrompt, theme: Theme) {
+    let title = match prompt.kind {
+        PathKind::ImportWav => "Import WAV",
+        PathKind::ExportSample => "Export sample",
+        PathKind::ExportSong => "Render song",
+    };
+    let mut lines = Vec::new();
+    let list_rows = 8usize;
+    let start = window_start_simple(prompt.selected, prompt.entries.len(), list_rows);
+    if prompt.entries.is_empty() {
+        lines.push("(empty directory)".to_string());
+    } else {
+        for (offset, row) in prompt
+            .entries
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(list_rows)
+        {
+            let mark = if offset == prompt.selected { ">" } else { " " };
+            let slash = if row.is_dir { "/" } else { "" };
+            lines.push(format!("{mark} {}{slash}", row.name));
+        }
+    }
+    while lines.len() < list_rows {
+        lines.push(String::new());
+    }
+    lines.push(format!("Path: {}", prompt.buffer));
+    if prompt.kind == PathKind::ExportSample {
+        let editing = if prompt.rate_focus { " (editing)" } else { "" };
+        let rate = if prompt.rate.is_empty() {
+            "C-2"
+        } else {
+            prompt.rate.as_str()
+        };
+        lines.push(format!(
+            "Rate: {rate} Hz{editing}   blank = C-2, Tab switches"
+        ));
+    }
+    lines.push("Enter opens or confirms. Esc cancels.".to_string());
+    draw_dialog(frame, area, title, &lines, prompt.error.as_deref(), theme);
+}
+
+fn draw_import_prompt(frame: &mut Frame, area: Rect, prompt: &ImportPrompt, theme: Theme) {
+    let nibble = if prompt.finetune < 0 {
+        u8::try_from(prompt.finetune + 16).unwrap_or(0)
+    } else {
+        u8::try_from(prompt.finetune).unwrap_or(0)
+    };
+    let note_rate = rate_for_note(prompt.note, nibble);
+    let rate_line = if let Some(text) = &prompt.rate_text {
+        format!("Rate        {text} Hz custom (r, digits; backspace clears)")
+    } else {
+        format!("Rate        {note_rate} Hz from the note (r to type a rate)")
+    };
+    let lines = [
+        format!("File        {}", prompt.path.display()),
+        format!(
+            "Base note   {}    left/right",
+            format_period(crate::notes::period_at(prompt.note))
+        ),
+        format!("Finetune    {:+}     up/down", prompt.finetune),
+        format!(
+            "Normalize   {}     n",
+            if prompt.normalize { "on" } else { "off" }
+        ),
+        format!(
+            "Dither      {}     d",
+            if prompt.dither { "on" } else { "off" }
+        ),
+        rate_line,
+        "Enter imports into the selected slot. Esc cancels.".to_string(),
+    ];
+    draw_dialog(
+        frame,
+        area,
+        "Import options",
+        &lines,
+        prompt.error.as_deref(),
+        theme,
+    );
+}
+
+fn draw_field_prompt(frame: &mut Frame, area: Rect, prompt: &FieldPrompt, theme: Theme) {
+    let (title, hint) = match prompt.kind {
+        FieldKind::Volume => ("Volume", "0..=64"),
+        FieldKind::Finetune => ("Finetune", "-8..=7"),
+        FieldKind::Loop => ("Loop", "start length, in bytes; length 0 turns it off"),
+        FieldKind::Trim => ("Trim", "start end, end exclusive, even bytes"),
+        FieldKind::CopyTo => ("Copy sample", "destination slot 1..=31"),
+    };
+    let lines = [
+        hint.to_string(),
+        format!("> {}", prompt.buffer),
+        "Enter applies. Esc cancels.".to_string(),
+    ];
+    draw_dialog(frame, area, title, &lines, prompt.error.as_deref(), theme);
+}
+
+fn draw_dialog(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    lines: &[impl AsRef<str>],
+    error: Option<&str>,
+    theme: Theme,
+) {
+    let mut body: Vec<Line<'static>> = lines
+        .iter()
+        .map(|line| styled(line.as_ref().to_string(), theme.text()))
+        .collect();
+    if let Some(error) = error {
+        body.push(styled(
+            error.to_string(),
+            paint(theme.effect, theme.background, false),
+        ));
+    }
+    let height = u16::try_from(body.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(area.height.saturating_sub(1))
+        .max(3);
+    let width = area.width.saturating_sub(4).max(20).min(area.width);
+    let rect = centered(area, width, height);
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    let block = Block::bordered()
+        .title(Span::styled(format!(" {title} "), theme.title()))
+        .border_style(paint(theme.border_focus, theme.background, false))
+        .style(theme.fill());
+    frame.render_widget(Paragraph::new(body).block(block), rect);
+}
+
+fn centered(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+fn window_start_simple(selected: usize, len: usize, window: usize) -> usize {
+    if window == 0 || len <= window {
+        return 0;
+    }
+    selected.saturating_sub(window / 2).min(len - window)
 }
 
 #[cfg(test)]
@@ -894,6 +1076,8 @@ mod tests {
         assert_has(&screen, "Ctrl-Z undo");
         assert_has(&screen, "Z S X D C V G B H N J M");
         assert_has(&screen, "unsaved");
+        assert_has(&screen, "import WAV");
+        assert_has(&screen, "R still renames");
 
         let mut app = demo();
         app.apply(Command::EnterNote(0));

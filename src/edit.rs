@@ -12,7 +12,8 @@
 
 use crate::error::Error;
 use crate::module::{
-    Cell, Module, Pattern, Tag, CHANNELS, ORDER_LEN, ROWS, SAMPLE_NAME_LEN, TITLE_LEN,
+    Cell, Module, Pattern, Sample, Tag, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT, SAMPLE_NAME_LEN,
+    TITLE_LEN,
 };
 use crate::notes::PERIODS;
 
@@ -234,6 +235,16 @@ enum Change {
         before: [u8; SAMPLE_NAME_LEN],
         after: [u8; SAMPLE_NAME_LEN],
     },
+    /// A whole instrument: PCM, loop, volume, finetune, and name.
+    Sample(Box<SampleChange>),
+}
+
+/// Before and after for one sample slot. Boxed because the PCM can be large.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SampleChange {
+    index: usize,
+    before: Sample,
+    after: Sample,
 }
 
 #[derive(Debug)]
@@ -701,6 +712,66 @@ impl Editor {
         Ok(())
     }
 
+    /// Run `edit` on sample `index` and push one undo entry if it changed.
+    ///
+    /// `Ok(false)` means the sample was left as it was. A rejected edit returns
+    /// the error and does not push.
+    pub fn edit_sample(
+        &mut self,
+        module: &mut Module,
+        index: usize,
+        edit: impl FnOnce(&mut Sample) -> Result<(), Error>,
+    ) -> Result<bool, Error> {
+        if index >= SAMPLE_COUNT {
+            return Err(Error::SampleEdit(format!(
+                "sample slot is outside 1..={SAMPLE_COUNT}"
+            )));
+        }
+        let before = module.samples[index].clone();
+        edit(&mut module.samples[index])?;
+        let after = module.samples[index].clone();
+        if after == before {
+            return Ok(false);
+        }
+        self.push(Change::Sample(Box::new(SampleChange {
+            index,
+            before,
+            after,
+        })));
+        Ok(true)
+    }
+
+    /// Copy sample `from` onto sample `to`. Both indexes are zero-based.
+    ///
+    /// The destination is one undo entry. Copying a slot onto itself does nothing.
+    pub fn copy_sample(
+        &mut self,
+        module: &mut Module,
+        from: usize,
+        to: usize,
+    ) -> Result<bool, Error> {
+        if from >= SAMPLE_COUNT || to >= SAMPLE_COUNT {
+            return Err(Error::SampleEdit(format!(
+                "sample slot is outside 1..={SAMPLE_COUNT}"
+            )));
+        }
+        if from == to {
+            return Ok(false);
+        }
+        let before = module.samples[to].clone();
+        crate::sample_edit::copy_to(module, from, to)?;
+        let after = module.samples[to].clone();
+        if after == before {
+            return Ok(false);
+        }
+        self.push(Change::Sample(Box::new(SampleChange {
+            index: to,
+            before,
+            after,
+        })));
+        Ok(true)
+    }
+
     fn map_column(
         &mut self,
         module: &mut Module,
@@ -893,6 +964,15 @@ fn apply_change(module: &mut Module, change: &Change, forward: bool) {
         } => {
             if let Some(sample) = module.samples.get_mut(*index) {
                 sample.name = if forward { *after } else { *before };
+            }
+        }
+        Change::Sample(change) => {
+            if let Some(sample) = module.samples.get_mut(change.index) {
+                *sample = if forward {
+                    change.after.clone()
+                } else {
+                    change.before.clone()
+                };
             }
         }
     }

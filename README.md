@@ -75,7 +75,32 @@ The order pane (Tab until the song header is focused) edits the order list. Up a
 
 Ctrl-T edits the title. On the sample list, `R` renames the current sample. Enter stores the text, Esc cancels. Names are Latin-1, 20 bytes for the title and 22 for a sample.
 
-Every edit is one undo step, with no depth cap. Undo and redo restore pattern cells, the order list, pattern count, the tag, the title, and sample names. Saving uses the same writer as the loader. Edit, save, and load again returns the edited module. Undoing back to the last save clears the `*`.
+Every edit is one undo step, with no depth cap. Undo and redo restore pattern cells, the order list, pattern count, the tag, the title, sample names, and the sample itself (PCM, loop, volume, finetune). Saving uses the same writer as the loader. Edit, save, and load again returns the edited module. Undoing back to the last save clears the `*`.
+
+### Samples
+
+On the sample list, `R` still renames the instrument. The other sample keys are only active on that pane, so they do not collide with edit-mode notes (`z` is a note while editing, and a fade on the sample list).
+
+```text
+i                import a WAV into this slot
+o                export this sample as 8-bit mono WAV
+Ctrl-G           render the song (same mix as --render)
+v / f            volume / finetune
+l                loop start and length, in bytes
+/                toggle the loop
+t                trim to start..end (end exclusive, even bytes)
+n                peak-normalize
+w                reverse (R stays rename)
+a / z            fade in / fade out
+c                clear the PCM and the loop
+y                copy this sample onto another slot
+p                preview at the note chosen with - and =
+u                undo, the same stack as Ctrl-Z
+```
+
+Import asks for a path (type one, or move through the directory list) and then how to resample. The default base note is C-2: the WAV is resampled to the Amiga rate of that note and finetune, so playing C-2 reproduces the original pitch. `n` toggles peak normalize, `d` toggles triangular dither, and `r` types a rate in hertz instead. Stereo is averaged to mono. 8, 16, and 24-bit PCM and 32-bit float are accepted, including `WAVEFORMATEXTENSIBLE`. A missing file stays on the picker. An unsupported encoding is reported and does not change the slot. Samples longer than 131070 bytes are cut, and that truncation stays on the status line. The stored length is always even.
+
+Export writes unsigned 8-bit mono at the sample's C-2 playback rate, or at a rate you type (Tab moves to the rate field). `p` auditions the sample through the same mixer as note preview, centered, for a few seconds. The sample list draws a one-line waveform with `|` at the loop points.
 
 If no output device can be opened, the tracker stays up and the transport bar shows the error. `--render` never touches the device.
 
@@ -161,23 +186,26 @@ src/main.rs       arguments, exit codes, terminal startup
 src/module.rs     Module, Pattern, Cell, Sample
 src/modfile.rs    .mod parser and writer
 src/notes.rs      finetune-0 period table and effect names
-src/edit.rs       note entry, blocks, song edits, undo
+src/edit.rs       note entry, blocks, song edits, the one undo stack
+src/convert.rs    WAV PCM to signed 8-bit mono
+src/sample_edit.rs volume, loop, trim, fades, copy
+src/waveform.rs   block waveform for the sample list
 src/player/       tick clock, effects, four-channel mixer
-src/audio.rs      cpal output
-src/wav.rs        16-bit stereo WAV writer
+src/audio.rs      cpal output and note/sample preview
+src/wav.rs        WAV reader, 16-bit stereo writer, 8-bit mono writer
 src/demo.rs       the original showcase module
 src/error.rs
-src/tui/          cursor, keys, drawing, colors
+src/tui/          cursor, keys, sample prompts, colors
 ```
 
-`Module` is the document. The TUI borrows it and keeps view state (which row, which channel, which order position). The replayer borrows it too and keeps the voices. That leaves room for the rest of v1:
+`Module` is the document. The TUI borrows it and keeps view state (which row, which channel, which order position). [`edit::Editor`](src/edit.rs) is the only undo stack: pattern cells, the order, the title, sample names, and sample PCM all push entries there. The replayer borrows the module and keeps the voices. Preview, of a typed note or of `p` on a sample, uses that mixer.
 
-| Milestone | What it adds | Where it should live |
+| Milestone | What it adds | Where it lives |
 | --- | --- | --- |
-| M1 | `.mod` load/save model, read-only tracker view | this tree |
+| M1 | `.mod` load/save model, tracker view | this tree |
 | M2 | 4-channel mixer, Amiga periods, effects, PipeWire/ALSA via cpal | `player`, `audio`, `wav` |
-| M3 | note entry, copy/paste, undo, ProTracker-style keys | `edit` mutates `Module`; the undo stack sits beside the document |
-| M4 | load samples from WAV and save `.mod` from the UI | produce signed 8-bit `Sample.data` (even length) and call the existing writer |
+| M3 | note entry, copy/paste, undo, ProTracker-style keys | `edit` |
+| M4 | WAV import/export and sample editing on that same undo stack | `convert`, `sample_edit`, the sample pane |
 | M5 | Omarchy theme, Arch `PKGBUILD`, polish | replace `Theme::protracker()`; packaging stays outside the library |
 
 Ctrl-S writes the module with the same writer the round-trip tests use.
