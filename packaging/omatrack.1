@@ -1,0 +1,233 @@
+.TH OMATRACK 1 "October 2026" "omatrack 0.1.0" "User Commands"
+.SH NAME
+omatrack \- ProTracker-style music tracker
+.SH SYNOPSIS
+.B omatrack
+[\fIoptions\fR] [\fIfile.mod\fR]
+.br
+.B omatrack \-\-render
+.I out.wav
+[\fIoptions\fR]
+.I file.mod
+.br
+.B omatrack \-\-help
+.br
+.B omatrack \-\-version
+.SH DESCRIPTION
+.B omatrack
+is a terminal tracker for 31-sample, 4-channel ProTracker modules
+.RB ( M.K. ,
+.BR M!K! ,
+.BR FLT4 ,
+and
+.BR 4CHN ).
+With no
+.I file.mod
+it starts an empty module.
+.PP
+The view needs about 76 columns and 20 rows.
+Space plays from the cursor.
+Enter toggles edit mode.
+A
+.B *
+after the title means the song has unsaved edits.
+Quit, new, and open ask before discarding them.
+.PP
+Colors come from the active Omarchy theme when one is installed, otherwise
+from the built-in ProTracker palette.
+See
+.BR CONFIGURATION .
+.SH OPTIONS
+.TP
+.BR \-\-theme " \fIname\fR"
+.BR auto ,
+.BR omarchy ,
+.BR protracker ,
+.BR phosphor ,
+or
+.BR terminal .
+Overrides the config file.
+.B terminal
+uses ANSI colors so the terminal's own palette shows through.
+.TP
+.BR \-\-config " \fIpath\fR"
+Read this config file instead of the default.
+.TP
+.BR \-\-render " \fIout.wav\fR"
+Mix the song to 16-bit stereo WAV and exit.
+Does not open an audio device.
+.TP
+.BR \-\-rate " \fIhz\fR"
+Sample rate for
+.BR \-\-render .
+Default is the config value, or 44100.
+.TP
+.BR \-\-max-seconds " \fIn\fR"
+Stop
+.B \-\-render
+after
+.I n
+seconds if the song does not loop.
+Default is the config value, or 600.
+.TP
+.BR \-\-interpolate " \fImode\fR"
+.B linear
+or
+.BR nearest .
+.TP
+.BR \-\-separation " \fI0\-100\fR"
+100 is hard Amiga panning.
+0 is mono.
+.TP
+.BR \-h ", " \-\-help
+Print the key list and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the version and exit.
+.SH KEYS
+.TP
+.B Enter
+Toggle edit mode.
+.TP
+.B Space
+Play or stop.
+.TP
+.B ?
+Key list.
+.B Esc
+closes it.
+.TP
+.B Ctrl-F
+File menu:
+.B n
+new,
+.B o
+open,
+.B s
+save,
+.B a
+save as.
+.TP
+.B Ctrl-S
+Save.
+An untitled module asks for a path.
+.TP
+.B Ctrl-Z / Ctrl-Y
+Undo / redo.
+.TP
+.B q, Esc, Ctrl-Q
+Quit.
+.B q
+works from browse mode.
+.B Ctrl-Q
+works anywhere.
+.B Esc
+clears a block, then leaves edit mode, then quits.
+Each asks when the song is modified.
+.TP
+.B Ctrl-C
+Copy.
+It does not quit.
+.TP
+.B Tab / Shift-Tab
+Next or previous pane.
+In edit mode, Tab changes channel.
+.TP
+.B 1 2 3 4
+Mute a channel.
+In edit mode use
+.BR Alt-1 " through " Alt-4 .
+.TP
+.B F1 / F2
+Octave, 1 through 3.
+.TP
+.B F3 / F4
+Edit step, 0 through 16.
+.PP
+In edit mode the lower piano row is
+.B Z S X D C V G B H N J M
+and the upper row is
+.BR "Q 2 W 3 E R 5 T 6 Y 7 U" .
+.B ?
+inside the program lists block, order, and sample keys.
+.SH CONFIGURATION
+The default file is
+.IR $XDG_CONFIG_HOME/omatrack/config.toml ,
+or
+.I ~/.config/omatrack/config.toml
+when
+.B XDG_CONFIG_HOME
+is unset.
+A missing file uses the defaults.
+A file that cannot be parsed is ignored, and the reason is shown on the
+status line.
+An example is installed at
+.IR /usr/share/omatrack/config.toml .
+.PP
+.EX
+theme = "auto"
+[audio]
+sample_rate = 44100
+interpolation = "linear"
+stereo_separation = 100
+max_seconds = 600
+[edit]
+octave = 2
+step = 1
+.EE
+.SH THEMES
+.B auto
+reads the active Omarchy theme.
+Current Omarchy writes it to
+.I ~/.local/state/omarchy/current/theme
+.RB ( $XDG_STATE_HOME
+when that is set).
+Older Omarchy used
+.IR ~/.config/omarchy/current/theme .
+The canonical palette is
+.IR colors.toml .
+If that file is absent, omatrack reads
+.IR alacritty.toml ,
+.IR kitty.conf ,
+or
+.I ghostty.conf
+from the same directory.
+.PP
+.B SIGUSR1
+reloads the theme, and so does a change to those files.
+Truecolor is used when
+.B COLORTERM
+is
+.I truecolor
+or
+.IR 24bit ,
+or when
+.B TERM
+names kitty, alacritty, or ghostty.
+Otherwise colors are quantized to 256 or 16 ANSI colors.
+.B \-\-theme terminal
+skips that and uses the terminal palette directly.
+.SH FILES
+.TP
+.I ~/.config/omatrack/config.toml
+User configuration.
+.TP
+.I ~/.local/state/omarchy/current/theme/
+Active Omarchy theme on current installs.
+.TP
+.I ~/.config/omarchy/current/theme/
+Active Omarchy theme on older installs.
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success, or help or version was printed.
+.TP
+.B 1
+The module, the WAV file, or the terminal could not be used.
+.TP
+.B 2
+The command line was not understood.
+.SH "SEE ALSO"
+The in-program help
+.RB ( ? )
+and the project README.

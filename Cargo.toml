@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.83"
 description = "ProTracker-style music tracker for Omarchy Linux"
 readme = "README.md"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/dannyowelch/omatrack"
 keywords = ["mod", "protracker", "tracker", "tui", "amiga"]
 categories = ["command-line-utilities", "multimedia::audio"]
@@ -17,3 +18,7 @@ ratatui = "0.29.0"
 # 0.17 is the last cpal that builds on Rust 1.83. On Linux the default host
 # is ALSA, which is also how PipeWire and PulseAudio present a device.
 cpal = "0.17.3"
+
+[target.'cfg(unix)'.dependencies]
+# Registers SIGUSR1 as an atomic flag. The handler itself lives in the crate.
+signal-hook = "=0.3.17"

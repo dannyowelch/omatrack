@@ -1,0 +1,33 @@
+# Omatrack configuration.
+#
+# Copy this file to ~/.config/omatrack/config.toml (or
+# $XDG_CONFIG_HOME/omatrack/config.toml). A missing file uses these defaults.
+# A file that cannot be parsed is ignored, and omatrack says why on startup
+# instead of exiting. Unknown keys are ignored. A bad value keeps that
+# setting's default and keeps the rest of the file.
+#
+# theme: auto | omarchy | protracker | phosphor | terminal
+#   auto       use the active Omarchy theme, or protracker when it is absent
+#   omarchy    require the Omarchy theme; protracker if none is installed
+#   protracker classic blue ProTracker screen (truecolor)
+#   phosphor   green on black
+#   terminal   ANSI colors, so the terminal's own palette shows through
+# The command-line flag --theme overrides this.
+theme = "auto"
+
+[audio]
+# Requested output rate. --render uses it directly. Live playback uses it when
+# the device supports it, and otherwise keeps the device's default rate.
+sample_rate = 44100
+# linear blends neighbouring samples. nearest plays the byte under the cursor.
+interpolation = "linear"
+# 100 is hard Amiga panning (channels 1 and 4 left, 2 and 3 right). 0 is mono.
+stereo_separation = 100
+# --render and the in-app song render stop here when the song never loops.
+max_seconds = 600
+
+[edit]
+# Piano octave, clamped to 1..=3. The upper row is one octave higher.
+octave = 2
+# Rows the cursor moves after a note or a finished parameter. 0..=16.
+step = 1

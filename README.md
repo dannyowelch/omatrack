@@ -2,15 +2,54 @@
 
 Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
 
-It loads a 4-channel `.mod`, shows it, plays it, and edits it. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back. A `*` after the title means the song has unsaved edits; quitting asks before discarding them.
+It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it starts an empty module. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them.
 
-## Build and run
+Colors follow the active Omarchy theme when one is installed. Otherwise the screen is the built-in ProTracker blue. `--theme` can force either of those, a green phosphor palette, or plain ANSI colors that track the terminal's own theme.
+
+![Pattern view in the ProTracker palette, playing](docs/screenshots/pattern.png)
+
+![The same song painted from an Omarchy Tokyo Night palette](docs/screenshots/omarchy.png)
+
+The pictures are the tracker buffer drawn with a monospace font. `cargo run --example screenshot -- out.cells pattern` writes the cells (`edit`, `help`, `file`, `phosphor`, and `omarchy` are the other views).
+
+## Install
 
 Rust 1.83 or newer is required. The committed `Cargo.lock` pins a few transitive crates so that compiler still builds. On Linux the audio backend is [cpal](https://docs.rs/cpal) through ALSA, which is also how PipeWire and PulseAudio expose an output. Building needs the ALSA headers (`libasound2-dev` on Debian and Ubuntu, `alsa-lib` on Arch).
+
+### Cargo
+
+```bash
+cargo install --locked --path .
+# or, once a release tag exists:
+cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.1.0
+```
+
+A tagged release also attaches `omatrack-x86_64-unknown-linux-gnu` to the GitHub release. Put that binary on `PATH`.
+
+### Omarchy / Arch
+
+The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.1.0`, the same version as `Cargo.toml`), not a git checkout. Before `makepkg`, replace the `SKIP` checksum with the sha256 of that tarball (the comment in the PKGBUILD has the command). Then:
+
+```bash
+cd packaging/arch
+makepkg -si
+```
+
+That installs `/usr/bin/omatrack`, a desktop entry that opens a terminal, an icon, the example config at `/usr/share/omatrack/config.toml`, a man page (`man omatrack`), the README, and the MIT and Apache-2.0 license files. The desktop entry has `Terminal=true`, so the session terminal (Ghostty, Alacritty, or Kitty on Omarchy) is what launches it.
+
+From a clone, without packaging:
+
+```bash
+cargo build --release --locked
+./target/release/omatrack
+```
+
+## Build and run
 
 ```bash
 cargo build --release
 cargo run -- path/to/song.mod
+cargo run --                 # new empty module
 ```
 
 Copyrighted modules do not belong in the repo. The tests load freely licensed fixtures from `tests/data/` (CC0, public domain, CC BY 4.0, and BSD-3-Clause; see `tests/data/README.md` and `tests/data/ATTRIBUTION.txt`). Other `*.mod` paths stay gitignored. Generate a small original song and open it:
@@ -28,13 +67,14 @@ cargo run -- --render /tmp/omatrack-showcase.wav /tmp/omatrack-showcase.mod
 
 `--rate`, `--interpolate linear|nearest`, and `--separation 0-100` apply to that render. `100` is hard Amiga panning (channels 1 and 4 left, 2 and 3 right). `0` is mono. The default interpolation is linear.
 
-`--help` prints the keys. `?` inside the tracker lists them too. The view wants about 76 columns by 20 rows; 80×24 is comfortable.
+`--help` prints the keys. `--version` prints the version. `?` inside the tracker lists them too. The view wants about 76 columns by 20 rows; 80×24 is comfortable. A smaller terminal says so instead of drawing a broken layout. Quitting, and a panic, both leave the terminal in its normal state.
 
 ```text
 Enter            edit / browse
 space            play / stop
 ?                key list
-Ctrl-S           save the module
+Ctrl-F           file menu: n new, o open, s save, a save as
+Ctrl-S           save (save as, when the module is untitled)
 Ctrl-Z / Ctrl-Y  undo / redo
 q, Esc, Ctrl-Q   quit (asks when the song is modified)
 Tab              pattern, samples, order
@@ -46,6 +86,50 @@ Home/End         first or last row, or sample
 [ ]              previous / next order position
 , .              previous / next pattern
 ```
+
+`q` quits from browse mode. `Ctrl-Q` quits from anywhere, including edit mode. `Esc` clears a block, then leaves edit mode, then quits. `Ctrl-C` copies; it does not quit. New and open, from the file menu, ask the same question as quit when the song is modified: `y` saves first, `n` discards, `Esc` cancels. Saving an untitled module opens the path picker. Cancelling that picker cancels the quit, new, or open that was waiting on it.
+
+![File menu over an unsaved module](docs/screenshots/file.png)
+
+### Configuration
+
+`~/.config/omatrack/config.toml`, or `$XDG_CONFIG_HOME/omatrack/config.toml` when that variable is set. `--config` points somewhere else. A missing file uses the defaults. A file that is not valid for the small TOML subset this program reads is ignored, and the reason is shown on the status line; omatrack still starts. A bad value keeps that setting's default and keeps the rest of the file. Unknown keys are ignored. The example, which is also what the package installs, is `packaging/config.toml`:
+
+```toml
+theme = "auto"
+
+[audio]
+sample_rate = 44100
+interpolation = "linear"
+stereo_separation = 100
+max_seconds = 600
+
+[edit]
+octave = 2
+step = 1
+```
+
+`--rate`, `--interpolate`, `--separation`, and `--max-seconds` override the audio section for `--render`. Live playback asks the device for `sample_rate` and uses the device's own rate when it cannot play that one. Interpolation and stereo separation still apply. Sample audition stays centered.
+
+### Themes
+
+How the palette is found, from the current Omarchy tree (`docs/theming.md` and `bin/omarchy-theme-set` / `bin/omarchy-theme-color` in [basecamp/omarchy](https://github.com/basecamp/omarchy)):
+
+- A theme starts as `colors.toml`. `omarchy-theme-set` copies it, renders terminal configs from templates, and publishes the result.
+- Current Omarchy puts that directory at `~/.local/state/omarchy/current/theme` (`$XDG_STATE_HOME/omarchy/current/theme` when the variable is set) and writes the theme's name to the sibling `theme.name`.
+- Older `omarchy-theme-set` published the same directory at `~/.config/omarchy/current/theme`.
+- `colors.toml` is the canonical palette: `background`, `foreground`, `accent`, `muted`, `bright_foreground` (the cursor; there is no separate cursor key), `selection`, and named colors such as `red` and `green`. Legacy short names (`bg`, `fg`, …) and ANSI `color0`–`color15` still resolve. The alias order matches `omarchy-theme-color`.
+- A theme that predates `colors.toml` may only have a rendered terminal config. Omatrack then reads `alacritty.toml`, `kitty.conf`, or `ghostty.conf` from that same directory.
+
+`--theme auto` (the default) uses that palette and falls back to ProTracker blue when none of those directories have one. `--theme omarchy` is the same read, and it says so when it has to fall back. `--theme protracker` and `--theme phosphor` are built in and do not touch the disk. `--theme terminal` uses ANSI colors, so a terminal that is already themed paints omatrack with that palette.
+
+![Phosphor, the other built-in palette](docs/screenshots/phosphor.png)
+
+Roles: background and foreground are the theme's own. The cursor is `bright_foreground` on the background, which is what Omarchy's terminal templates use. Edit mode uses the accent, so it stays distinct from that cursor. The playback row mixes the background toward green. Channel headers are red, yellow, green, and blue. The waveform is cyan. Errors are red.
+
+Truecolor (`ESC[38;2;…m`) is used when `COLORTERM` is `truecolor` or `24bit`, or when `TERM` names kitty, alacritty, or ghostty. A 256-color `TERM` gets the xterm cube. Anything else, including a dumb terminal, gets the 16 ANSI colors. `OMATRACK_COLOR=truecolor|256|16` overrides that. Named ANSI colors, including the whole `terminal` theme, are left as indexes so they keep tracking the terminal.
+
+`SIGUSR1` reloads the palette (`kill -USR1` the process). So does a change to the theme file, the theme directory, or `theme.name`, which is what an atomic `omarchy-theme-set` swap looks like. The check is a `stat` each frame.
 
 `[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo.
 
@@ -102,7 +186,7 @@ Import asks for a path (type one, or move through the directory list) and then h
 
 Export writes unsigned 8-bit mono at the sample's C-2 playback rate, or at a rate you type (Tab moves to the rate field). `p` auditions the sample through the same mixer as note preview, centered, for a few seconds. The sample list draws a one-line waveform with `|` at the loop points.
 
-If no output device can be opened, the tracker stays up and the transport bar shows the error. `--render` never touches the device.
+If no output device can be opened, the tracker stays up and the transport bar names PipeWire, PulseAudio, and ALSA. `--render` never touches the device. A device that cannot play the configured sample rate keeps its own rate.
 
 ## Playback
 
@@ -183,6 +267,8 @@ A short file, a bad tag, or a song length outside `1..=128` returns an error. 15
 ```text
 src/lib.rs        library root
 src/main.rs       arguments, exit codes, terminal startup
+src/config.rs     ~/.config/omatrack/config.toml
+src/omarchy.rs    active Omarchy palette
 src/module.rs     Module, Pattern, Cell, Sample
 src/modfile.rs    .mod parser and writer
 src/notes.rs      finetune-0 period table and effect names
@@ -196,6 +282,7 @@ src/wav.rs        WAV reader, 16-bit stereo writer, 8-bit mono writer
 src/demo.rs       the original showcase module
 src/error.rs
 src/tui/          cursor, keys, sample prompts, colors
+packaging/        PKGBUILD, desktop entry, man page, example config
 ```
 
 `Module` is the document. The TUI borrows it and keeps view state (which row, which channel, which order position). [`edit::Editor`](src/edit.rs) is the only undo stack: pattern cells, the order, the title, sample names, and sample PCM all push entries there. The replayer borrows the module and keeps the voices. Preview, of a typed note or of `p` on a sample, uses that mixer.
@@ -206,6 +293,12 @@ src/tui/          cursor, keys, sample prompts, colors
 | M2 | 4-channel mixer, Amiga periods, effects, PipeWire/ALSA via cpal | `player`, `audio`, `wav` |
 | M3 | note entry, copy/paste, undo, ProTracker-style keys | `edit` |
 | M4 | WAV import/export and sample editing on that same undo stack | `convert`, `sample_edit`, the sample pane |
-| M5 | Omarchy theme, Arch `PKGBUILD`, polish | replace `Theme::protracker()`; packaging stays outside the library |
+| M5 | Omarchy theme, config file, Arch `PKGBUILD`, file menu | `omarchy`, `config`, `packaging/` |
 
 Ctrl-S writes the module with the same writer the round-trip tests use.
+
+## License
+
+Omatrack is MIT or Apache-2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
+
+The modules in `tests/data/` are fixtures and are not under those licenses. Each one keeps the license named in `tests/data/ATTRIBUTION.txt` (CC0, public domain, CC BY 4.0, and BSD-3-Clause). Do not commit copyrighted `.mod` files.

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Omatrack
+GenericName=Music tracker
+Comment=ProTracker-style music tracker
+Exec=omatrack
+Icon=omatrack
+Terminal=true
+Categories=AudioVideo;Audio;Midi;
+Keywords=mod;protracker;tracker;amiga;module;
+StartupNotify=false

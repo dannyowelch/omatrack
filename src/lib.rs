@@ -7,12 +7,14 @@
 //! and follows the playhead.
 //!
 //! [`edit::Editor`] mutates a [`Module`] and keeps the undo stack beside the
-//! document, not inside the file format. [`tui::Theme`] supplies colors so an
-//! Omarchy palette can replace the ProTracker blue without touching input.
+//! document, not inside the file format. [`tui::Theme`] paints from a built-in
+//! palette or from the active Omarchy theme. [`config`] reads
+//! `~/.config/omatrack/config.toml`.
 
 #![forbid(unsafe_code)]
 
 pub mod audio;
+pub mod config;
 pub mod convert;
 pub mod demo;
 pub mod edit;
@@ -20,6 +22,7 @@ pub mod error;
 pub mod modfile;
 pub mod module;
 pub mod notes;
+pub mod omarchy;
 pub mod player;
 pub mod sample_edit;
 pub mod tui;
