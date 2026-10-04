@@ -13,7 +13,7 @@ use super::theme::{paint, Theme};
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "q quit  tab view  arrows/hjkl  pgup/pgdn  home/end  [ ] order  , . pattern";
+const HELP: &str = "space play  1-4 mute  q quit  tab view  hjkl  [ ] order  , . pattern";
 
 /// Draw the viewer into `frame`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -34,6 +34,16 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_pattern(frame, regions.pattern, app, theme);
     draw_samples(frame, regions.samples, app, theme);
     frame.render_widget(
+        Paragraph::new(clip(transport_text(app), regions.transport.width)).style(
+            if app.audio_error.is_some() {
+                paint(theme.effect, theme.background, false)
+            } else {
+                theme.text()
+            },
+        ),
+        regions.transport,
+    );
+    frame.render_widget(
         Paragraph::new(clip(status_text(app), regions.status.width)).style(theme.text()),
         regions.status,
     );
@@ -47,6 +57,7 @@ struct Regions {
     song: Rect,
     pattern: Rect,
     samples: Rect,
+    transport: Rect,
     status: Rect,
     help: Rect,
 }
@@ -55,8 +66,9 @@ fn layout(area: Rect, app: &App) -> Option<Regions> {
     if area.width < MIN_WIDTH || area.height < MIN_HEIGHT {
         return None;
     }
-    let [body, status, help] = Layout::vertical([
+    let [body, transport, status, help] = Layout::vertical([
         Constraint::Fill(1),
+        Constraint::Length(1),
         Constraint::Length(1),
         Constraint::Length(1),
     ])
@@ -77,6 +89,7 @@ fn layout(area: Rect, app: &App) -> Option<Regions> {
         song,
         pattern,
         samples,
+        transport,
         status,
         help,
     })
@@ -273,7 +286,9 @@ fn pattern_row(
     inner_w: usize,
 ) -> Line<'static> {
     let on_row = row == app.row;
-    let row_bg = if on_row {
+    let row_bg = if on_row && app.playing {
+        theme.play_bg
+    } else if on_row {
         theme.row_bg
     } else {
         theme.background
@@ -389,6 +404,29 @@ fn fit_chars(text: &str, width: usize) -> String {
         out.push_str(&" ".repeat(width - count));
     }
     out
+}
+
+fn transport_text(app: &App) -> String {
+    if let Some(error) = &app.audio_error {
+        return error.clone();
+    }
+    let state = if app.playing { "Play" } else { "Stop" };
+    let mut channels = String::new();
+    for (index, muted) in app.muted.iter().enumerate() {
+        if index > 0 {
+            channels.push(' ');
+        }
+        let mark = if *muted { "off" } else { "on" };
+        channels.push_str(&format!("{}:{mark}", index + 1));
+    }
+    format!(
+        "{state}  Ord {:02}/{:02}  Row {:02}  Spd {:02}  Tmp {:03}  {channels}",
+        app.order_pos,
+        app.song_len(),
+        app.row,
+        app.speed,
+        app.tempo,
+    )
 }
 
 fn status_text(app: &App) -> String {
@@ -598,10 +636,34 @@ mod tests {
         assert_has(&screen, "snare");
         assert_has(&screen, "set volume");
         assert_has(&screen, "q quit");
+        assert_has(&screen, "Stop");
+        assert_has(&screen, "Spd 06");
+        assert_has(&screen, "Tmp 125");
+        assert_has(&screen, "1:on");
         assert_has(&screen, "* Pattern");
         assert!(!screen.contains("too small"), "{screen}");
 
         let (x, y) = find_sequence(&buf, &["C", "-", "1"]).expect("note");
+        assert_eq!(buf[(x, y)].bg, Color::Yellow);
+        assert_ne!(buf[(x - 1, y)].bg, Color::Rgb(16, 92, 48));
+    }
+
+    #[test]
+    fn playback_paints_the_current_row_and_the_transport() {
+        let mut app = demo();
+        app.playing = true;
+        app.speed = 6;
+        app.tempo = 125;
+        app.muted[1] = true;
+        app.follow(1, 0, 6, 125);
+        let buf = render(&mut app, 100, 40);
+        let screen = text_of(&buf);
+        assert_has(&screen, "Play");
+        assert_has(&screen, "Ord 01/02");
+        assert_has(&screen, "2:off");
+        assert_has(&screen, "Pat 01");
+        let (x, y) = find_sequence(&buf, &["C", "-", "2"]).expect("playing note");
+        assert_eq!(buf[(x - 1, y)].bg, Color::Rgb(16, 92, 48));
         assert_eq!(buf[(x, y)].bg, Color::Yellow);
     }
 

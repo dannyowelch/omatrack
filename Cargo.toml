@@ -14,3 +14,6 @@ categories = ["command-line-utilities", "multimedia::audio"]
 # the terminal backend share one crossterm.
 crossterm = "0.28.1"
 ratatui = "0.29.0"
+# 0.17 is the last cpal that builds on Rust 1.83. On Linux the default host
+# is ALSA, which is also how PipeWire and PulseAudio present a device.
+cpal = "0.17.3"

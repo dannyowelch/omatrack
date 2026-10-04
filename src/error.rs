@@ -85,6 +85,8 @@ pub enum Error {
     },
     /// The terminal could not be switched into or out of the TUI.
     Terminal(io::Error),
+    /// Playback could not start, or a render could not be stored.
+    Audio(String),
 }
 
 impl Error {
@@ -155,6 +157,7 @@ impl fmt::Display for Error {
                 write!(f, "failed to {verb} {}: {source}", path.display())
             }
             Self::Terminal(source) => write!(f, "terminal error: {source}"),
+            Self::Audio(message) => write!(f, "{message}"),
         }
     }
 }
