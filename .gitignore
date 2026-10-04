@@ -6,3 +6,7 @@
 # Song data is not source. Freely licensed fixtures under tests/data are the exception.
 *.mod
 !tests/data/*.mod
+*.xm
+*.it
+!tests/data/*.xm
+!tests/data/*.it
