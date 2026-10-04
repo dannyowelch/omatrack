@@ -424,7 +424,7 @@ pub struct App {
     clipboard: Clipboard,
     pub(crate) editor: Editor,
     quit: bool,
-    /// Spectrum, meters, or the scope. Off until F5.
+    /// Spectrum, meters, or the scope. The spectrum is up at launch.
     pub(crate) viz_mode: VizMode,
     /// Smoothed levels for the open visualization.
     pub(crate) viz: VizState,
@@ -473,7 +473,7 @@ impl App {
             clipboard: Clipboard::default(),
             editor: Editor::new(),
             quit: false,
-            viz_mode: VizMode::Off,
+            viz_mode: VizMode::Panel,
             viz: VizState::new(),
         }
     }
@@ -537,18 +537,20 @@ impl App {
         self.theme_label = label.into();
     }
 
-    /// Octave, step, and mixer settings from the config file or the command line.
+    /// Octave, step, mixer, and the startup visualization.
     pub fn set_preferences(
         &mut self,
         octave: u8,
         step: u8,
         player: PlayerConfig,
         max_seconds: f64,
+        default_view: VizMode,
     ) {
         self.octave = octave;
         self.step = step;
         self.player = player;
         self.max_seconds = max_seconds;
+        self.viz_mode = default_view;
     }
 
     /// Take the action armed by a save-and-continue prompt.
@@ -1836,15 +1838,17 @@ mod tests {
     #[test]
     fn f5_cycles_the_visualization_while_editing() {
         let mut app = App::new(Module::new(Tag::Mk));
-        assert_eq!(app.viz_mode(), VizMode::Off);
-        assert_eq!(command_for(&app, Key::F(5)), Some(Command::CycleViz));
-        app.apply(Command::CycleViz);
         assert_eq!(app.viz_mode(), VizMode::Panel);
-        app.apply(Command::ToggleEdit);
         assert_eq!(command_for(&app, Key::F(5)), Some(Command::CycleViz));
         app.apply(Command::CycleViz);
         assert_eq!(app.viz_mode(), VizMode::Scope);
+        app.apply(Command::ToggleEdit);
+        assert_eq!(command_for(&app, Key::F(5)), Some(Command::CycleViz));
         app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Off);
+        app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Panel);
+        app.set_preferences(2, 1, PlayerConfig::default(), 600.0, VizMode::Off);
         assert_eq!(app.viz_mode(), VizMode::Off);
     }
 }

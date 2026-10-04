@@ -153,10 +153,13 @@ Octave, 1 through 3.
 Edit step, 0 through 16.
 .TP
 .B F5
-Cycle the visualization: hidden, then the spectrum and channel meters,
-then the full-screen scope, then hidden again.
+Cycle the visualization: the spectrum and channel meters, then the
+full-screen scope, then hidden, then the spectrum again.
+The tracker opens on the spectrum unless
+.B default_view
+says otherwise.
 The spectrum needs about 28 rows; a shorter terminal keeps the pattern
-and F5 still reaches the scope.
+without an error, and F5 still reaches the scope.
 .PP
 In edit mode the lower piano row is
 .B Z S X D C V G B H N J M
@@ -180,6 +183,7 @@ An example is installed at
 .PP
 .EX
 reopen_last = true
+default_view = "spectrum"
 theme = "auto"
 [audio]
 sample_rate = 44100
@@ -199,6 +203,15 @@ or
 .IR ~/.local/state/omatrack/last_file ,
 not in this file.
 It is updated on open, save, and save as, and cleared for a new untitled module.
+.B default_view
+is
+.BR spectrum ,
+.BR scope ,
+or
+.BR off .
+.B spectrum
+is the default.
+A short terminal hides that panel and does not treat it as a failure.
 .SH THEMES
 .B auto
 reads the active Omarchy theme.

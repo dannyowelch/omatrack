@@ -10,12 +10,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::viz::{draw_scope, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
+use crate::viz::{draw_scope, spectrum_column, ColumnInk, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
 
 use super::app::App;
 use super::theme::{paint, Theme};
 
-const VBLOCK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 const HBLOCK: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
 /// Rows the spectrum pane needs, including its border.
@@ -83,13 +82,12 @@ fn panel_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
     if columns == 0 {
         return Vec::new();
     }
-    let body = paint(theme.spectrum, theme.background, false);
-    let cap = paint(theme.spectrum_peak, theme.background, false);
-    let mut grid = vec![vec![(' ', body); columns]; rows];
+    let empty = theme.fill();
+    let mut grid = vec![vec![(' ', empty); columns]; rows];
     for column in 0..columns {
         let level = column_value(app, columns, column, false);
         let peak = column_value(app, columns, column, true).max(level);
-        paint_column(&mut grid, column, level, peak, body, cap);
+        paint_column(&mut grid, column, level, peak, theme);
     }
     let mut lines = Vec::with_capacity(rows);
     for (row, cells) in grid.iter().enumerate() {
@@ -120,18 +118,24 @@ fn column_value(app: &App, columns: usize, index: usize, peak: bool) -> f32 {
     if count == 0 || columns == 0 {
         return 0.0;
     }
-    let start = index * count / columns;
-    let end = ((index + 1) * count / columns).max(start + 1).min(count);
-    let mut best = 0.0f32;
-    for bar in start..end {
-        let value = if peak {
+    let sample = |bar: usize| {
+        if peak {
             app.viz.bar_peak(bar)
         } else {
             app.viz.bar(bar)
-        };
-        best = best.max(value);
+        }
+    };
+    if count == 1 {
+        return sample(0);
     }
-    best
+    // Sample the center of the cell and blend the two bands it lands between,
+    // so a column boundary does not jump to the louder neighbor.
+    let pos =
+        ((index as f32 + 0.5) * count as f32 / columns as f32 - 0.5).clamp(0.0, (count - 1) as f32);
+    let left = pos.floor() as usize;
+    let right = (left + 1).min(count - 1);
+    let frac = pos - left as f32;
+    sample(left) * (1.0 - frac) + sample(right) * frac
 }
 
 fn paint_column(
@@ -139,30 +143,51 @@ fn paint_column(
     column: usize,
     level: f32,
     peak: f32,
-    body: Style,
-    cap: Style,
+    theme: Theme,
 ) {
     let rows = grid.len();
-    let total = rows * 8;
-    let steps = quantize(level, total);
-    let peak_steps = quantize(peak, total).max(steps);
-    for (row, line) in grid.iter_mut().enumerate() {
+    let cap = paint(theme.spectrum_peak, theme.background, false);
+    for (row, cell) in spectrum_column(rows, level, peak).into_iter().enumerate() {
         let from_bottom = rows - 1 - row;
-        let start = from_bottom * 8;
-        let filled = steps.saturating_sub(start).min(8);
-        let floating = peak_steps > steps && peak_steps > start && peak_steps <= start + 8;
-        let (glyph, style) = if filled == 0 && floating {
-            let mark = (peak_steps - start).clamp(1, 8);
-            (VBLOCK[mark], cap)
-        } else if filled == 0 {
-            (' ', body)
-        } else if from_bottom == steps.saturating_sub(1) / 8 {
-            (VBLOCK[filled], cap)
-        } else {
-            (VBLOCK[filled], body)
+        let style = match cell.ink {
+            ColumnInk::Peak => cap,
+            ColumnInk::Body => body_style(theme, from_bottom, rows),
+            ColumnInk::Empty => theme.fill(),
         };
-        line[column] = (glyph, style);
+        grid[row][column] = (cell.glyph, style);
     }
+}
+
+/// Body color for one row. Truecolor themes darken toward the background at
+/// the bottom of the column; named ANSI colors stay the single spectrum color.
+fn body_style(theme: Theme, from_bottom: usize, rows: usize) -> Style {
+    paint(
+        body_color(theme, from_bottom, rows),
+        theme.background,
+        false,
+    )
+}
+
+fn body_color(theme: Theme, from_bottom: usize, rows: usize) -> ratatui::style::Color {
+    let (ratatui::style::Color::Rgb(sr, sg, sb), ratatui::style::Color::Rgb(br, bg, bb)) =
+        (theme.spectrum, theme.background)
+    else {
+        return theme.spectrum;
+    };
+    let t = if rows <= 1 {
+        1.0
+    } else {
+        from_bottom as f32 / (rows - 1) as f32
+    };
+    // The top of the bar is the theme color. Lower rows ease toward the
+    // background so the column has a height gradient without a second hue.
+    let mix = 0.45 + 0.55 * t;
+    ratatui::style::Color::Rgb(lerp(br, sr, mix), lerp(bg, sg, mix), lerp(bb, sb, mix))
+}
+
+fn lerp(from: u8, to: u8, t: f32) -> u8 {
+    let value = f32::from(from) + (f32::from(to) - f32::from(from)) * t;
+    value.round().clamp(0.0, 255.0) as u8
 }
 
 fn push_meter(
@@ -280,4 +305,64 @@ fn quantize(level: f32, total: usize) -> usize {
     }
     let steps = (level.clamp(0.0, 1.0) * total as f32).round() as usize;
     steps.min(total)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    use crate::viz::PEAK_CAP;
+
+    #[test]
+    fn the_peak_cap_renders_in_the_cell_above_its_bar() {
+        let theme = Theme::protracker();
+        let rows = 4;
+        let columns = 3;
+        let mut grid = vec![vec![(' ', theme.fill()); columns]; rows];
+        // Close pairs: the held peak shares or just clears the bar's top cell.
+        let levels = [0.40_f32, 0.50, 0.62];
+        let peaks = [0.45_f32, 0.62, 0.70];
+        for (column, (level, peak)) in levels.into_iter().zip(peaks).enumerate() {
+            paint_column(&mut grid, column, level, peak, theme);
+        }
+        let lines: Vec<Line<'static>> = grid.iter().map(|row| Line::from(group(row))).collect();
+        let backend = TestBackend::new(columns as u16, rows as u16);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| {
+                frame.render_widget(Paragraph::new(lines), frame.area());
+            })
+            .expect("draw");
+        let buffer = terminal.backend().buffer().clone();
+        for column in 0..columns {
+            let mut peak_at = None;
+            let mut body_at = None;
+            for row in 0..rows {
+                let cell = &buffer[(column as u16, row as u16)];
+                if cell.symbol() == " " {
+                    continue;
+                }
+                if cell.fg == theme.spectrum_peak {
+                    assert_eq!(
+                        cell.symbol().chars().next(),
+                        Some(PEAK_CAP),
+                        "column {column} row {row}"
+                    );
+                    assert!(peak_at.is_none(), "two caps in column {column}");
+                    peak_at = Some(row);
+                } else if body_at.is_none() {
+                    body_at = Some(row);
+                }
+            }
+            let peak_at = peak_at.expect("cap");
+            let body_at = body_at.expect("bar");
+            assert_eq!(
+                peak_at + 1,
+                body_at,
+                "column {column} cap row {peak_at} is not on top of bar row {body_at}"
+            );
+        }
+    }
 }

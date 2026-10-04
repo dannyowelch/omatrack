@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 
 use crate::edit::{clamp_octave, clamp_step, DEFAULT_OCTAVE, DEFAULT_STEP};
 use crate::player::{Interpolation, PlayerConfig, DEFAULT_SAMPLE_RATE};
+use crate::viz::VizMode;
 
 /// Safety cap for `--render` and the interactive song render, in seconds.
 pub const DEFAULT_MAX_SECONDS: f64 = 600.0;
@@ -68,6 +69,8 @@ pub struct Config {
     pub step: u8,
     /// Load the last module when the command line does not name one.
     pub reopen_last: bool,
+    /// Visualization shown when the tracker opens.
+    pub default_view: VizMode,
 }
 
 impl Default for Config {
@@ -79,6 +82,7 @@ impl Default for Config {
             octave: DEFAULT_OCTAVE,
             step: DEFAULT_STEP,
             reopen_last: true,
+            default_view: VizMode::Panel,
         }
     }
 }
@@ -226,6 +230,15 @@ pub(crate) fn parse_text(text: &str) -> Result<Parsed, String> {
         match step.parse::<i32>() {
             Ok(value) => config.step = clamp_step(value),
             Err(_) => warnings.push(format!("edit.step must be a number, got {step}")),
+        }
+    }
+
+    if let Some(view) = table.get("default_view") {
+        match VizMode::parse(view) {
+            Some(mode) => config.default_view = mode,
+            None => warnings.push(format!(
+                "default_view must be spectrum, scope, or off, got {view}; keeping spectrum"
+            )),
         }
     }
 
@@ -501,5 +514,23 @@ mod tests {
         let parsed = parse_text("reopen_last = \"maybe\"\n").unwrap();
         assert!(parsed.warning.is_some());
         assert!(parsed.config.reopen_last);
+        assert_eq!(parsed.config.default_view, VizMode::Panel);
+    }
+
+    #[test]
+    fn default_view_accepts_spectrum_scope_and_off() {
+        let parsed = parse_text("default_view = \"scope\"\n").unwrap();
+        assert!(parsed.warning.is_none(), "{:?}", parsed.warning);
+        assert_eq!(parsed.config.default_view, VizMode::Scope);
+        assert_eq!(parsed.config.theme, ThemeRequest::Auto);
+
+        let parsed = parse_text("default_view = \"off\"\ntheme = \"phosphor\"\n").unwrap();
+        assert_eq!(parsed.config.default_view, VizMode::Off);
+        assert_eq!(parsed.config.theme, ThemeRequest::Phosphor);
+
+        let parsed = parse_text("default_view = \"nope\"\nreopen_last = false\n").unwrap();
+        assert!(parsed.warning.unwrap().contains("default_view"));
+        assert_eq!(parsed.config.default_view, VizMode::Panel);
+        assert!(!parsed.config.reopen_last);
     }
 }
