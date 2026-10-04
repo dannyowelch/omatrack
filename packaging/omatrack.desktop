@@ -2,10 +2,10 @@
 Type=Application
 Name=Omatrack
 GenericName=Music tracker
-Comment=ProTracker-style music tracker
+Comment=Terminal tracker for .mod, .xm, and .it
 Exec=omatrack
 Icon=omatrack
 Terminal=true
 Categories=AudioVideo;Audio;Midi;
-Keywords=mod;protracker;tracker;amiga;module;
+Keywords=mod;xm;it;protracker;tracker;amiga;module;
 StartupNotify=false

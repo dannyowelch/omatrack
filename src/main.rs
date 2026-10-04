@@ -1,4 +1,4 @@
-//! `omatrack [file.mod]` — ProTracker viewer and player.
+//! `omatrack [file]` — terminal tracker for .mod, .xm, and .it.
 
 #![forbid(unsafe_code)]
 
