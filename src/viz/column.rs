@@ -107,6 +107,20 @@ fn peak_placement(rows: usize, steps: usize, peak_steps: usize) -> Option<(usize
     Some((from_bottom, glyph))
 }
 
+/// Analyzer band drawn in display column `index`.
+///
+/// The mapping depends only on the column count and the band count. It does
+/// not look at the levels, so a cap cannot slide into the next column when a
+/// neighbor gets louder. `index` past `columns`, or an empty series, is 0.
+pub fn column_band(index: usize, columns: usize, bars: usize) -> usize {
+    if columns == 0 || bars == 0 {
+        return 0;
+    }
+    let index = index.min(columns - 1);
+    let slot = (index as u64).saturating_mul(bars as u64) / columns as u64;
+    (slot as usize).min(bars - 1)
+}
+
 /// Sample `values` at display column `index`.
 ///
 /// The point is the center of the column, blended between the two bands it
@@ -147,6 +161,23 @@ fn quantize(level: f32, total: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_column_always_reads_the_same_band() {
+        assert_eq!(column_band(0, 10, 10), 0);
+        assert_eq!(column_band(9, 10, 10), 9);
+        // Wider than the analyzer: neighboring columns share a band, and the
+        // choice does not depend on the levels.
+        assert_eq!(column_band(0, 100, 48), 0);
+        assert_eq!(column_band(1, 100, 48), 0);
+        assert_eq!(column_band(20, 96, 48), 10);
+        assert_eq!(column_band(21, 96, 48), 10);
+        let left = column_band(40, 104, 48);
+        let right = column_band(41, 104, 48);
+        assert!(right <= left + 1);
+        assert_eq!(column_band(0, 0, 48), 0);
+        assert_eq!(column_band(3, 8, 0), 0);
+    }
 
     #[test]
     fn the_peak_cap_is_a_thin_glyph_at_the_fractional_height() {

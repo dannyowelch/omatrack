@@ -7,6 +7,7 @@
 //! does not own the song clock.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{SampleFormat, Stream, StreamConfig};
@@ -15,6 +16,24 @@ use crate::error::Error;
 use crate::module::Module;
 use crate::player::{Playback, PlayerConfig};
 use crate::viz::{VizAccum, VizBus, VizSnapshot};
+
+/// Mix on the UI thread and publish analyzer windows without opening a device.
+///
+/// Set to `1`, `true`, or `yes`. The tracker still redraws on its normal
+/// timer; only the sound-device open is skipped. For machines with no ALSA,
+/// PipeWire, or PulseAudio output, and for capturing the live spectrum.
+pub const SOFTWARE_AUDIO_ENV: &str = "OMATRACK_SOFTWARE_AUDIO";
+
+/// `true` when [`SOFTWARE_AUDIO_ENV`] requests the device-free mixer.
+pub fn software_audio_enabled() -> bool {
+    match std::env::var(SOFTWARE_AUDIO_ENV) {
+        Ok(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        ),
+        Err(_) => false,
+    }
+}
 
 /// Shown when the host cannot see an output device.
 pub const NO_DEVICE: &str = "No audio output device. PipeWire, PulseAudio, and ALSA did not expose an output; check that a sound server is running and a device is connected";
@@ -57,6 +76,12 @@ pub struct AudioOutput {
     preferences: PlayerConfig,
     /// Latest mix window for the spectrum. The callback only stores atomics.
     viz: Arc<VizBus>,
+    /// Mix on this thread instead of a cpal callback. See [`SOFTWARE_AUDIO_ENV`].
+    software: bool,
+    /// Rolling window for [`Self::software`] publishes. The callback keeps its own.
+    accum: VizAccum,
+    /// Wall clock of the last software mix, so each pump covers the gap.
+    last_pump: Instant,
 }
 
 impl AudioOutput {
@@ -75,6 +100,9 @@ impl AudioOutput {
             rate: None,
             preferences: PlayerConfig::default(),
             viz: Arc::new(VizBus::new()),
+            software: false,
+            accum: VizAccum::new(),
+            last_pump: Instant::now(),
         }
     }
 
@@ -112,6 +140,9 @@ impl AudioOutput {
         muted: [bool; 4],
     ) -> Result<(), Error> {
         self.stop();
+        if software_audio_enabled() {
+            return self.start_software(module, order, row, muted);
+        }
         let opened = open_device(self.preferences.sample_rate)?;
         let config = self.mix_config(opened.config.sample_rate);
         self.rate = Some(opened.config.sample_rate);
@@ -170,6 +201,72 @@ impl AudioOutput {
         self.deactivate();
         self.stream = None;
         self.rate = None;
+        self.software = false;
+        self.accum = VizAccum::new();
+    }
+
+    /// Render the audio that elapsed since the previous pump.
+    ///
+    /// No-op unless playback was started under [`SOFTWARE_AUDIO_ENV`]. The UI
+    /// calls this once per frame, before it reads the analyzer, so the
+    /// spectrum sees the same mix the callback would have published.
+    pub fn pump_software(&mut self) {
+        if !self.software {
+            return;
+        }
+        let active = self
+            .shared
+            .lock()
+            .map(|shared| shared.active)
+            .unwrap_or(false);
+        if !active {
+            return;
+        }
+        let now = Instant::now();
+        let dt = now.saturating_duration_since(self.last_pump).as_secs_f32();
+        self.last_pump = now;
+        if !dt.is_finite() || dt < 0.005 {
+            return;
+        }
+        let dt = dt.min(0.10);
+        let rate = self.rate.unwrap_or(44_100).max(1);
+        let frames = ((dt * rate as f32).round() as usize).clamp(1, (rate as usize) / 4);
+        let mut scratch = vec![0i16; frames * 2];
+        let peaks = render_scratch(&self.shared, frames, &mut scratch);
+        self.accum.push(&scratch, peaks, &self.viz, rate);
+    }
+
+    fn start_software(
+        &mut self,
+        module: &Module,
+        order: usize,
+        row: usize,
+        muted: [bool; 4],
+    ) -> Result<(), Error> {
+        let rate = self.preferences.sample_rate.max(1);
+        let config = self.mix_config(rate);
+        let module = module.clone();
+        let mut playback = Playback::new(config);
+        for (channel, mute) in muted.into_iter().enumerate() {
+            playback.set_mute(channel, mute);
+        }
+        playback.start(&module, order, row);
+        {
+            let mut shared = lock_shared(&self.shared);
+            shared.module = module;
+            shared.playback = playback;
+            shared.active = true;
+            shared.song = true;
+            shared.preview_left = None;
+        }
+        if let Ok(mut slot) = self.error.lock() {
+            *slot = None;
+        }
+        self.rate = Some(rate);
+        self.software = true;
+        self.accum = VizAccum::new();
+        self.last_pump = Instant::now();
+        Ok(())
     }
 
     /// Play one note through the mixer without moving the song.

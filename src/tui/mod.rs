@@ -149,6 +149,9 @@ pub fn run(session: Session) -> Result<(), Error> {
         let now = Instant::now();
         let dt = now.saturating_duration_since(last_draw).as_secs_f32();
         last_draw = now;
+        // Software playback publishes the mix before the analyzer reads it.
+        // A real device is already publishing from its own callback.
+        audio.pump_software();
         if app.viz_mode != VizMode::Off {
             let snapshot = audio.visualization();
             app.tick_viz(snapshot.as_ref(), dt);

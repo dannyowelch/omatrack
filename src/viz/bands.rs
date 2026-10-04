@@ -14,8 +14,8 @@ pub struct Band {
 
 /// Lowest frequency the spectrum tries to show.
 ///
-/// A 512-point FFT at 44.1 kHz cannot separate 30 Hz from the next bin, so
-/// that energy lives in the first bar rather than in a run of identical bars.
+/// A 2048-point FFT at 44.1 kHz resolves about 21 Hz, so 30 Hz still shares
+/// the first bins rather than painting a run of identical bars.
 pub const F_MIN_HZ: f32 = 30.0;
 /// Highest frequency the spectrum tries to show, before the Nyquist clamp.
 pub const F_MAX_HZ: f32 = 16_000.0;

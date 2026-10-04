@@ -17,10 +17,29 @@ use super::theme::{paint, Theme};
 
 const HBLOCK: [char; 9] = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'];
 
-/// Rows the spectrum pane needs, including its border.
-pub(crate) const PANEL_HEIGHT: u16 = 6;
 /// Terminal height at which the panel fits beside the pattern and the samples.
 pub(crate) const PANEL_MIN_HEIGHT: u16 = 28;
+
+/// Outer height of the spectrum pane, including its border.
+///
+/// Content rows scale with the terminal: 6 on a 30-row screen (so the pattern
+/// still has a few rows), 10 around 40, and 12 when there is more room.
+/// Shorter than [`PANEL_MIN_HEIGHT`] draws no panel.
+pub(crate) fn panel_height(term_height: u16) -> u16 {
+    if term_height < PANEL_MIN_HEIGHT {
+        return 0;
+    }
+    let content = if term_height < 32 {
+        6
+    } else if term_height < 37 {
+        8
+    } else if term_height < 45 {
+        10
+    } else {
+        12
+    };
+    content + 2
+}
 
 /// Spectrum bars and four channel meters.
 pub(crate) fn draw_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
@@ -291,6 +310,25 @@ mod tests {
     use ratatui::Terminal;
 
     use crate::viz::{PEAK_CAP_HIGH, PEAK_CAP_LOW};
+
+    #[test]
+    fn the_panel_grows_with_the_terminal_and_stays_in_range() {
+        assert_eq!(panel_height(24), 0);
+        assert_eq!(panel_height(27), 0);
+        // 6 content rows on a 30-line terminal, 10 at 40, 12 above 45.
+        assert_eq!(panel_height(30), 8);
+        assert_eq!(panel_height(36), 10);
+        assert_eq!(panel_height(40), 12);
+        assert_eq!(panel_height(80), 14);
+        for height in 28..60 {
+            let outer = panel_height(height);
+            let content = outer - 2;
+            assert!(
+                (6..=12).contains(&content),
+                "height {height} content {content}"
+            );
+        }
+    }
 
     #[test]
     fn the_peak_cap_renders_as_a_thin_glyph_in_its_own_cell() {

@@ -123,6 +123,7 @@ fn old_spectrum() -> Ballistics {
         hold: 0.22,
         peak_decay: 0.40,
         linear_peak: false,
+        peak_gravity: 0.0,
     }
 }
 
