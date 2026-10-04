@@ -1,18 +1,19 @@
 //! Terminal UI.
 //!
-//! [`App`] holds the cursor. [`draw`] paints it. [`run`] owns the terminal and,
-//! while playback is on, the audio stream. Milestone 3 can add edit commands
-//! without changing this split, and milestone 5 can replace [`Theme`](theme::Theme).
+//! [`App`] holds the cursor and the edit commands. [`draw`] paints them.
+//! [`run`] owns the terminal and, while playback is on, the audio stream.
+//! Milestone 5 can replace [`Theme`](theme::Theme).
 
 mod app;
 mod render;
 mod theme;
 
-pub use app::{command_for, App, Command, Focus, Key};
+pub use app::{command_for, App, Command, Focus, Key, Outcome};
 pub use render::draw;
 pub use theme::Theme;
 
 use std::io;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use crossterm::cursor::{Hide, Show};
@@ -30,17 +31,18 @@ use crate::module::Module;
 
 use self::app::Key as AppKey;
 
-/// Show `module` until the user quits.
+/// Show `module` until the user quits. Ctrl-S writes it back to `path`.
 ///
-/// Space starts playback from the cursor row. If no output device can be
-/// opened, the transport bar shows the error and the view stays up.
-pub fn run(module: Module) -> Result<(), Error> {
+/// Space starts playback from the cursor. Enter toggles edit mode. If no
+/// output device can be opened, the transport bar shows the error and the
+/// view stays up. Note preview is skipped when that happens.
+pub fn run(module: Module, path: PathBuf) -> Result<(), Error> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).map_err(Error::Terminal)?;
     terminal.clear().map_err(Error::Terminal)?;
 
-    let mut app = App::new(module);
+    let mut app = App::open(module, path);
     let mut audio = AudioOutput::new();
     loop {
         if app.playing {
@@ -48,8 +50,13 @@ pub fn run(module: Module) -> Result<(), Error> {
                 audio.stop();
                 app.fail_audio(message);
             } else if let Some(snapshot) = audio.snapshot() {
-                app.follow(snapshot.order, snapshot.row, snapshot.speed, snapshot.tempo);
+                app.set_clock(snapshot.speed, snapshot.tempo);
+                if !app.editing {
+                    app.follow(snapshot.order, snapshot.row, snapshot.speed, snapshot.tempo);
+                }
             }
+        } else {
+            audio.stop_if_preview_done();
         }
         terminal
             .draw(|frame| draw(frame, &mut app))
@@ -57,7 +64,7 @@ pub fn run(module: Module) -> Result<(), Error> {
         let wait = if app.playing { 20 } else { 200 };
         if event::poll(Duration::from_millis(wait)).map_err(Error::Terminal)? {
             if let Event::Key(key) = event::read().map_err(Error::Terminal)? {
-                if let Some(command) = map_key(key).and_then(|key| command_for(app.focus, key)) {
+                if let Some(command) = map_key(key).and_then(|key| command_for(&app, key)) {
                     handle_command(&mut app, &mut audio, command);
                 }
             }
@@ -71,10 +78,10 @@ pub fn run(module: Module) -> Result<(), Error> {
 }
 
 fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
-    match command {
-        Command::TogglePlay => {
-            let was_playing = app.playing;
-            app.apply(Command::TogglePlay);
+    let was_playing = app.playing;
+    let outcome = app.apply(command);
+    match outcome {
+        Outcome::Play => {
             if app.playing {
                 if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
                     app.fail_audio(err.to_string());
@@ -83,11 +90,52 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
                 audio.stop();
             }
         }
-        Command::ToggleMute(channel) => {
-            app.apply(Command::ToggleMute(channel));
-            audio.set_mute(channel, app.muted[channel]);
+        Outcome::Mute(channel) => audio.set_mute(channel, app.muted[channel]),
+        Outcome::Preview {
+            sample,
+            period,
+            channel,
+        } => {
+            if app.playing {
+                audio.replace_module(&app.module);
+            } else {
+                // A missing device must not cover the pattern. Space still
+                // reports that failure on the transport bar.
+                let _ = audio.preview(&app.module, sample, period, channel);
+            }
         }
-        other => app.apply(other),
+        Outcome::Edited => {
+            if app.playing {
+                audio.replace_module(&app.module);
+            }
+        }
+        Outcome::Save => {
+            persist(app);
+        }
+        Outcome::SaveAndQuit => {
+            if persist(app) {
+                app.quit_now();
+            }
+        }
+        Outcome::None => {}
+    }
+}
+
+fn persist(app: &mut App) -> bool {
+    match app.save() {
+        Ok(()) => {
+            let name = app
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("module");
+            app.set_message(format!("Saved {name}"));
+            true
+        }
+        Err(message) => {
+            app.set_message(message);
+            false
+        }
     }
 }
 
@@ -95,16 +143,29 @@ fn map_key(key: KeyEvent) -> Option<AppKey> {
     if key.kind == KeyEventKind::Release {
         return None;
     }
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
+    if ctrl && alt {
+        return None;
+    }
+    if alt {
         return match key.code {
-            KeyCode::Char('c') | KeyCode::Char('C') | KeyCode::Char('q') | KeyCode::Char('Q') => {
-                Some(AppKey::CtrlC)
-            }
+            KeyCode::Char(ch) => Some(AppKey::Alt(ch.to_ascii_lowercase())),
+            KeyCode::Up => Some(AppKey::AltUp),
+            KeyCode::Down => Some(AppKey::AltDown),
+            KeyCode::Left => Some(AppKey::AltLeft),
+            KeyCode::Right => Some(AppKey::AltRight),
             _ => None,
         };
     }
-    if key.modifiers.contains(KeyModifiers::ALT) {
-        return None;
+    if ctrl {
+        return match key.code {
+            KeyCode::Char(ch) => Some(AppKey::Ctrl(ctrl_char(ch))),
+            KeyCode::Backspace => Some(AppKey::CtrlBackspace),
+            KeyCode::Delete => Some(AppKey::CtrlDelete),
+            KeyCode::Insert => Some(AppKey::CtrlInsert),
+            _ => None,
+        };
     }
     match key.code {
         KeyCode::Char(ch) => Some(AppKey::Char(ch)),
@@ -119,7 +180,21 @@ fn map_key(key: KeyEvent) -> Option<AppKey> {
         KeyCode::Tab => Some(AppKey::Tab),
         KeyCode::BackTab => Some(AppKey::BackTab),
         KeyCode::Esc => Some(AppKey::Esc),
+        KeyCode::Enter => Some(AppKey::Enter),
+        KeyCode::Backspace => Some(AppKey::Backspace),
+        KeyCode::Delete => Some(AppKey::Delete),
+        KeyCode::Insert => Some(AppKey::Insert),
+        KeyCode::F(n) => Some(AppKey::F(n)),
         _ => None,
+    }
+}
+
+fn ctrl_char(ch: char) -> char {
+    let raw = u32::from(ch);
+    if (1..=26).contains(&raw) {
+        char::from(b'a' + u8::try_from(raw - 1).unwrap_or(0))
+    } else {
+        ch.to_ascii_lowercase()
     }
 }
 
@@ -160,9 +235,15 @@ mod tests {
         assert_eq!(map_key(release), None);
 
         let ctrl = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(map_key(ctrl), Some(AppKey::CtrlC));
+        assert_eq!(map_key(ctrl), Some(AppKey::Ctrl('c')));
+        let ctrl_code = KeyEvent::new(KeyCode::Char('\u{13}'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_code), Some(AppKey::Ctrl('s')));
 
-        let alt = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT);
-        assert_eq!(map_key(alt), None);
+        let alt = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::ALT);
+        assert_eq!(map_key(alt), Some(AppKey::Alt('k')));
+        let alt_up = KeyEvent::new(KeyCode::Up, KeyModifiers::ALT);
+        assert_eq!(map_key(alt_up), Some(AppKey::AltUp));
+        let insert = KeyEvent::new(KeyCode::Insert, KeyModifiers::CONTROL);
+        assert_eq!(map_key(insert), Some(AppKey::CtrlInsert));
     }
 }

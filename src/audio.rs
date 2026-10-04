@@ -39,6 +39,10 @@ struct Shared {
     module: Module,
     playback: Playback,
     active: bool,
+    /// The callback is mixing the song, not a note preview.
+    song: bool,
+    /// Frames of preview still to mix. `None` while a song is playing.
+    preview_left: Option<u32>,
 }
 
 /// A live output stream. Opening the device is deferred until [`Self::start`].
@@ -46,6 +50,8 @@ pub struct AudioOutput {
     stream: Option<Stream>,
     shared: Arc<Mutex<Shared>>,
     error: Arc<Mutex<Option<String>>>,
+    /// Sample rate of the open stream, when there is one.
+    rate: Option<u32>,
 }
 
 impl AudioOutput {
@@ -57,8 +63,11 @@ impl AudioOutput {
                 module: Module::default(),
                 playback: Playback::new(PlayerConfig::default()),
                 active: false,
+                song: false,
+                preview_left: None,
             })),
             error: Arc::new(Mutex::new(None)),
+            rate: None,
         }
     }
 
@@ -77,6 +86,7 @@ impl AudioOutput {
         let opened = open_device()?;
         let mut config = PlayerConfig::default();
         config.sample_rate = opened.config.sample_rate;
+        self.rate = Some(opened.config.sample_rate);
         let module = module.clone();
         let mut playback = Playback::new(config);
         for (channel, mute) in muted.into_iter().enumerate() {
@@ -88,6 +98,8 @@ impl AudioOutput {
             shared.module = module;
             shared.playback = playback;
             shared.active = true;
+            shared.song = true;
+            shared.preview_left = None;
         }
         if let Ok(mut slot) = self.error.lock() {
             *slot = None;
@@ -115,6 +127,78 @@ impl AudioOutput {
     pub fn stop(&mut self) {
         self.deactivate();
         self.stream = None;
+        self.rate = None;
+    }
+
+    /// Play one note through the mixer without moving the song.
+    ///
+    /// Ignored while a song is already playing. The scratch module uses
+    /// `module`'s sample data and the device's sample rate.
+    pub fn preview(
+        &mut self,
+        module: &Module,
+        sample: u8,
+        period: u16,
+        channel: usize,
+    ) -> Result<(), Error> {
+        {
+            let shared = lock_shared(&self.shared);
+            if shared.song && shared.active {
+                return Ok(());
+            }
+        }
+        let scratch = crate::player::preview_module(module, sample, period, channel);
+        if self.stream.is_none() {
+            let opened = open_device()?;
+            self.rate = Some(opened.config.sample_rate);
+            let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
+            stream.play().map_err(|err| {
+                self.deactivate();
+                self.rate = None;
+                Error::Audio(format!(
+                    "could not start preview on \"{}\": {err}",
+                    opened.name
+                ))
+            })?;
+            self.stream = Some(stream);
+        }
+        let rate = self
+            .rate
+            .unwrap_or(crate::player::DEFAULT_SAMPLE_RATE)
+            .max(1);
+        let config = PlayerConfig {
+            sample_rate: rate,
+            ..PlayerConfig::default()
+        };
+        let mut playback = Playback::new(config);
+        playback.start(&scratch, 0, 0);
+        let frames = (rate / 5).max(1);
+        let mut shared = lock_shared(&self.shared);
+        shared.module = scratch;
+        shared.playback = playback;
+        shared.song = false;
+        shared.active = true;
+        shared.preview_left = Some(frames);
+        Ok(())
+    }
+
+    /// Replace the song the callback is mixing. Preview is left alone.
+    pub fn replace_module(&self, module: &Module) {
+        let mut shared = lock_shared(&self.shared);
+        if shared.song {
+            shared.module = module.clone();
+        }
+    }
+
+    /// Close a preview stream after it has finished.
+    pub fn stop_if_preview_done(&mut self) {
+        let done = {
+            let shared = lock_shared(&self.shared);
+            self.stream.is_some() && !shared.song && !shared.active
+        };
+        if done {
+            self.stop();
+        }
     }
 
     /// Silence one channel, or bring it back.
@@ -145,6 +229,8 @@ impl AudioOutput {
     fn deactivate(&self) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.active = false;
+            shared.song = false;
+            shared.preview_left = None;
         }
     }
 }
@@ -274,16 +360,36 @@ fn render_scratch(shared: &Mutex<Shared>, frames: usize, scratch: &mut Vec<i16>)
         scratch.fill(0);
         return;
     };
-    let Shared {
-        module,
-        playback,
-        active,
-    } = &mut *shared;
-    if !*active || frames == 0 {
+    if frames == 0 || !shared.active {
         scratch.fill(0);
         return;
     }
-    playback.render(module, scratch);
+    if shared.song {
+        let Shared {
+            module, playback, ..
+        } = &mut *shared;
+        playback.render(module, scratch);
+        return;
+    }
+    let left = shared.preview_left.unwrap_or(0);
+    if left == 0 {
+        scratch.fill(0);
+        shared.active = false;
+        return;
+    }
+    let n = frames.min(usize::try_from(left).unwrap_or(frames));
+    scratch[n * 2..].fill(0);
+    {
+        let Shared {
+            module, playback, ..
+        } = &mut *shared;
+        playback.render(module, &mut scratch[..n * 2]);
+    }
+    let left = left.saturating_sub(u32::try_from(n).unwrap_or(left));
+    shared.preview_left = Some(left);
+    if left == 0 {
+        shared.active = false;
+    }
 }
 
 fn write_frame<T: SampleConvert>(frame: &mut [T], left: i16, right: i16) {

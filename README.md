@@ -2,7 +2,7 @@
 
 Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
 
-It loads a 4-channel `.mod`, shows it, and plays it. Space starts playback from the cursor. The pattern highlight follows the song. Nothing is edited yet.
+It loads a 4-channel `.mod`, shows it, plays it, and edits it. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back. A `*` after the title means the song has unsaved edits; quitting asks before discarding them.
 
 ## Build and run
 
@@ -28,13 +28,17 @@ cargo run -- --render /tmp/omatrack-showcase.wav /tmp/omatrack-showcase.mod
 
 `--rate`, `--interpolate linear|nearest`, and `--separation 0-100` apply to that render. `100` is hard Amiga panning (channels 1 and 4 left, 2 and 3 right). `0` is mono. The default interpolation is linear.
 
-`--help` prints the keys. The view wants about 76 columns by 20 rows; 80×24 is comfortable.
+`--help` prints the keys. `?` inside the tracker lists them too. The view wants about 76 columns by 20 rows; 80×24 is comfortable.
 
 ```text
+Enter            edit / browse
 space            play / stop
-1 2 3 4          mute that channel
-q, Esc, Ctrl-C   quit
-Tab              switch between the pattern and the sample list
+?                key list
+Ctrl-S           save the module
+Ctrl-Z / Ctrl-Y  undo / redo
+q, Esc, Ctrl-Q   quit (asks when the song is modified)
+Tab              pattern, samples, order
+1 2 3 4          mute that channel (Alt-1..4 while editing)
 Up/Down, j/k     move the cursor
 Left/Right, h/l  change channel (pattern view)
 PgUp/PgDn        page
@@ -43,9 +47,35 @@ Home/End         first or last row, or sample
 , .              previous / next pattern
 ```
 
-`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, the view follows the playhead instead: the current row is green, and the transport bar shows order, row, speed, and tempo.
+`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo.
 
-Notes use ProTracker octave numbers (`C-1` is period 856, not `C-4`). Sample numbers in the pattern are decimal `01`–`31`. The loop column is `start+length` in bytes, and `-` means the sample does not loop. Quit with `q`; the file is not modified.
+Notes use ProTracker octave numbers (`C-1` is period 856, not `C-4`). Sample numbers in the pattern are decimal `01`–`31`. The loop column is `start+length` in bytes, and `-` means the sample does not loop.
+
+### Editing
+
+Enter turns on edit mode. The pattern pane is labeled `EDIT`, the transport says `EDIT`, and the cursor sits on one field of the cell: note, sample tens, sample ones, effect command, parameter high, parameter low. Left and right move between those fields and across channels. Up and down move rows. Tab and Shift-Tab move a channel at a time. `hjkl` stay as movement keys in browse mode; in edit mode `h` and `j` are notes.
+
+The piano is the ProTracker layout. The lower row plays the current octave. The upper row plays the octave above. F1 and F2 change the octave (1–3, so the upper row is silent on octave 3). F3 and F4 change the edit step (0–16). A note writes that period and the current sample (the one selected in the sample list) and moves down by the step. The effect on the cell is left alone. The note is previewed through the playback engine when the song is stopped.
+
+```text
+upper   Q 2 W 3 E R 5 T 6 Y 7 U     octave + 1
+        C C#D D#E F F#G G#A A#B
+
+lower   Z S X D C V G B H N J M     current octave
+        C C#D D#E F F#G G#A A#B
+```
+
+Sample digits are decimal, because the column shows `00`–`31`. Effect command and parameter digits are hex. Typing the parameter's low digit moves down by the edit step and returns to the note.
+
+Delete on the note clears the whole cell. Delete on a digit clears that digit. Backspace clears the cell one step up (the current cell when the step is 0) and moves there. Insert pushes the current channel down. Ctrl-Backspace pulls it up. Ctrl-Insert and Ctrl-Delete do the same for every channel.
+
+Ctrl-B starts a block at the cursor; moving the cursor grows it, and Ctrl-B again clears it. Ctrl-A selects the pattern. Ctrl-C copies, Ctrl-X cuts, Ctrl-V pastes at the cursor. Alt-Up and Alt-Down transpose by a semitone. Alt-Left and Alt-Right transpose by an octave. Notes that are not in the ProTracker period table are left alone, and the ends of C-1..B-3 clamp. Alt-K clears the channel. Alt-P clears the pattern. With no block marked, copy, cut, and transpose use the current cell. Ctrl-C copies; it does not quit.
+
+The order pane (Tab until the song header is focused) edits the order list. Up and Down change the pattern number at the cursor. Insert and Delete insert and remove an entry. `+` and `-` change the song length. `N` appends an empty pattern and points the current entry at it. Past 64 patterns an `M.K.` tag becomes `M!K!`.
+
+Ctrl-T edits the title. On the sample list, `R` renames the current sample. Enter stores the text, Esc cancels. Names are Latin-1, 20 bytes for the title and 22 for a sample.
+
+Every edit is one undo step, with no depth cap. Undo and redo restore pattern cells, the order list, pattern count, the tag, the title, and sample names. Saving uses the same writer as the loader. Edit, save, and load again returns the edited module. Undoing back to the last save clears the `*`.
 
 If no output device can be opened, the tracker stays up and the transport bar shows the error. `--render` never touches the device.
 
@@ -131,6 +161,7 @@ src/main.rs       arguments, exit codes, terminal startup
 src/module.rs     Module, Pattern, Cell, Sample
 src/modfile.rs    .mod parser and writer
 src/notes.rs      finetune-0 period table and effect names
+src/edit.rs       note entry, blocks, song edits, undo
 src/player/       tick clock, effects, four-channel mixer
 src/audio.rs      cpal output
 src/wav.rs        16-bit stereo WAV writer
@@ -145,8 +176,8 @@ src/tui/          cursor, keys, drawing, colors
 | --- | --- | --- |
 | M1 | `.mod` load/save model, read-only tracker view | this tree |
 | M2 | 4-channel mixer, Amiga periods, effects, PipeWire/ALSA via cpal | `player`, `audio`, `wav` |
-| M3 | note entry, copy/paste, undo, ProTracker-style keys | commands that mutate `Module`, with the undo stack next to `App` rather than inside the file format |
+| M3 | note entry, copy/paste, undo, ProTracker-style keys | `edit` mutates `Module`; the undo stack sits beside the document |
 | M4 | load samples from WAV and save `.mod` from the UI | produce signed 8-bit `Sample.data` (even length) and call the existing writer |
 | M5 | Omarchy theme, Arch `PKGBUILD`, polish | replace `Theme::protracker()`; packaging stays outside the library |
 
-The viewer does not write the file it opened.
+Ctrl-S writes the module with the same writer the round-trip tests use.

@@ -54,7 +54,8 @@ fn run() -> Result<(), MainError> {
     if let Some(render) = options.render {
         render_song(&module, &render)?;
     } else {
-        omatrack::tui::run(module).map_err(|err| MainError::Failed(err.to_string()))?;
+        omatrack::tui::run(module, options.module)
+            .map_err(|err| MainError::Failed(err.to_string()))?;
     }
     Ok(())
 }
@@ -236,8 +237,9 @@ Usage:
     omatrack --help
 
 Opens a 31-sample, 4-channel .mod file (M.K., M!K!, FLT4, or 4CHN).
-The terminal needs about 76×20. Space plays from the cursor; if no audio
-device is available the error stays on the transport bar.
+The terminal needs about 76×20. Space plays from the cursor. Enter
+toggles edit mode. Ctrl-S writes the file. ? lists every key. If no
+audio device is available the error stays on the transport bar.
 
     --render <out.wav>     mix the song to a 16-bit stereo WAV and exit
     --rate <hz>            WAV sample rate (default 44100)
@@ -246,10 +248,14 @@ device is available the error stays on the transport bar.
     --separation <0-100>   100 is hard Amiga panning, 0 is mono
 
 Keys:
+    Enter                edit / browse
     space                play / stop
-    1 2 3 4              mute channel
-    q, Esc, Ctrl-C       quit
-    Tab                  switch between the pattern and the sample list
+    ?                    key list
+    Ctrl-S               save
+    Ctrl-Z / Ctrl-Y      undo / redo
+    q, Esc, Ctrl-Q       quit (asks when the song is modified)
+    Tab                  pattern, samples, order
+    1 2 3 4              mute channel (Alt-1..4 in edit mode)
     Up/Down, j/k         move the cursor
     Left/Right, h/l      change channel (pattern view)
     PgUp/PgDn            page

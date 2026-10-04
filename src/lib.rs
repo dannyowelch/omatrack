@@ -6,14 +6,15 @@
 //! ALSA (and, through it, PipeWire or PulseAudio). [`tui`] draws the document
 //! and follows the playhead.
 //!
-//! Editing should mutate a [`Module`], with the undo stack beside the TUI.
-//! [`tui::Theme`] supplies colors so an Omarchy palette can replace the
-//! ProTracker blue without touching input handling.
+//! [`edit::Editor`] mutates a [`Module`] and keeps the undo stack beside the
+//! document, not inside the file format. [`tui::Theme`] supplies colors so an
+//! Omarchy palette can replace the ProTracker blue without touching input.
 
 #![forbid(unsafe_code)]
 
 pub mod audio;
 pub mod demo;
+pub mod edit;
 pub mod error;
 pub mod modfile;
 pub mod module;
@@ -22,6 +23,7 @@ pub mod player;
 pub mod tui;
 pub mod wav;
 
+pub use edit::Editor;
 pub use error::Error;
 pub use modfile::{HEADER_LEN, PATTERN_BYTES};
 pub use module::{Cell, Module, Pattern, Sample, Tag, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT};

@@ -32,6 +32,12 @@ pub struct Theme {
     pub play_bg: Color,
     /// Background on the selected order entry.
     pub order_bg: Color,
+    /// Foreground of the edit-mode field cursor.
+    pub edit_fg: Color,
+    /// Background of the edit-mode field cursor.
+    pub edit_bg: Color,
+    /// Background of a selected block.
+    pub block_bg: Color,
     /// Unfocused pane border.
     pub border: Color,
     /// Focused pane border.
@@ -54,6 +60,9 @@ impl Theme {
             row_bg: Color::Rgb(24, 36, 150),
             play_bg: Color::Rgb(16, 92, 48),
             order_bg: Color::Rgb(210, 170, 40),
+            edit_fg: Color::Black,
+            edit_bg: Color::White,
+            block_bg: Color::Rgb(72, 48, 140),
             border: Color::Rgb(80, 100, 170),
             border_focus: Color::Yellow,
         }
