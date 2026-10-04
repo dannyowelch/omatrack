@@ -2,8 +2,8 @@
 //! [`VizState::tick`], never inside the audio callback.
 
 use super::agc::AutoGain;
-use super::ballistics::{approach, smooth_spectrum, Ballistics, Meter, PeakMark};
-use super::bands::{db_unit, display_shift, spectrum_magnitudes};
+use super::ballistics::{approach, smooth_spectrum, Ballistics, Meter};
+use super::bands::{db_unit, spectrum_magnitudes};
 use super::bus::VizSnapshot;
 use super::column::column_band;
 use super::WINDOW;
@@ -49,16 +49,9 @@ pub struct VizState {
     /// Smoothed bar heights, one per analyzer band. Display columns read these
     /// through [`column_band`]; they are not resampled per frame.
     bar_levels: Vec<f32>,
-    /// Peak hold for each analyzer band, driven by [`Self::bar_levels`].
-    ///
-    /// A mark's index is its band. Drawing it copies that index into every
-    /// display column of the band, so the cap cannot change column on its own.
-    peaks: Vec<PeakMark>,
     /// Linear power envelope, one per band, before the dB curve.
     band_env: Vec<f32>,
     column_count: usize,
-    /// Gain already folded into the held peaks.
-    applied_gain: f32,
 }
 
 impl Default for VizState {
@@ -75,10 +68,8 @@ impl Default for VizState {
             last_mag_peak: 0.0,
             meter_input: [0.0; 4],
             bar_levels: Vec::new(),
-            peaks: Vec::new(),
             band_env: Vec::new(),
             column_count: 0,
-            applied_gain: 1.0,
         }
     }
 }
@@ -198,13 +189,12 @@ impl VizState {
         }
     }
 
-    /// Smooth `raw` into the bars, then advance one peak per band.
+    /// Smooth `raw` into the bars.
     ///
-    /// Neighbor blending and the meter ballistics happen first. Each peak then
-    /// follows that band's smoothed level, never the raw FFT frame, so a bin
-    /// that flickers for one window cannot pin a cap in a neighboring column.
+    /// Neighbor blending and the spectrum ballistics happen here. The panel
+    /// draws [`Meter::level`] and nothing above it, so a noisy bin cannot
+    /// leave a cap behind in another column.
     fn apply_bar_targets(&mut self, raw: &[f32], dt: f32) {
-        self.rescale_held_peaks();
         let _blended = smooth_spectrum(&mut self.bars, raw, dt);
         let count = raw.len().min(self.bars.len());
         self.bar_levels = self
@@ -213,40 +203,11 @@ impl VizState {
             .take(count)
             .map(|meter| meter.level)
             .collect();
-        self.advance_bar_peaks(dt);
-    }
-
-    /// Keep held marks in the same display units as the bars when gain moves.
-    fn rescale_held_peaks(&mut self) {
-        let gain = self.agc.gain();
-        let shift = display_shift(self.applied_gain, gain);
-        self.applied_gain = gain;
-        if shift.abs() < 1.0e-6 {
-            return;
-        }
-        for meter in &mut self.bars {
-            meter.rescale_peak(shift);
-        }
-        for mark in &mut self.peaks {
-            mark.rescale(shift);
-        }
-    }
-
-    fn advance_bar_peaks(&mut self, dt: f32) {
-        if self.peaks.len() != self.bar_levels.len() {
-            self.peaks
-                .resize(self.bar_levels.len(), PeakMark::default());
-        }
-        let ballistics = Ballistics::spectrum();
-        for (mark, level) in self.peaks.iter_mut().zip(&self.bar_levels) {
-            mark.update(*level, dt, ballistics);
-        }
     }
 
     /// How many spectrum columns the panel is painting.
     ///
-    /// This only records the width used to map columns onto bands. Peak state
-    /// stays on the bands, so a resize does not slide a cap sideways.
+    /// This records the width used to map columns onto bands.
     pub fn set_column_count(&mut self, columns: usize) {
         self.column_count = columns;
     }
@@ -257,23 +218,9 @@ impl VizState {
         self.bar_levels.get(band).copied().unwrap_or(0.0)
     }
 
-    /// Peak-hold mark for display column `index`.
-    ///
-    /// The mark belongs to the column's band. Every column of that band reads
-    /// the same value, and nothing in this function writes a new column.
-    pub fn column_peak(&self, index: usize) -> f32 {
-        let band = column_band(index, self.column_count, self.peaks.len());
-        self.peaks.get(band).map(|mark| mark.value).unwrap_or(0.0)
-    }
-
     /// Smoothed bar height, `0..=1`.
     pub fn bar(&self, index: usize) -> f32 {
         self.bars.get(index).map(|meter| meter.level).unwrap_or(0.0)
-    }
-
-    /// Peak-hold mark for that bar.
-    pub fn bar_peak(&self, index: usize) -> f32 {
-        self.bars.get(index).map(|meter| meter.peak).unwrap_or(0.0)
     }
 
     /// Number of spectrum bars.
@@ -386,11 +333,7 @@ mod tests {
         let mut snap = sine_snapshot(440.0, [8000, 0, 0, 0], 1);
         state.tick(Some(&snap), 0.05);
         let level = max_bar(&state);
-        let peak = max_peak(&state);
-        assert!(
-            level > 0.3 && peak + 0.001 >= level,
-            "level {level} peak {peak}"
-        );
+        assert!(level > 0.3, "level {level}");
         for _ in 0..4 {
             state.tick(Some(&snap), 0.02);
         }
@@ -398,12 +341,6 @@ mod tests {
             max_bar(&state) > level * 0.75,
             "duplicate window drained the bar to {}",
             max_bar(&state)
-        );
-        assert!(
-            max_peak(&state) + 0.02 >= peak,
-            "peak hold cleared {} -> {}",
-            peak,
-            max_peak(&state)
         );
         state.tick(None, 0.02);
         assert!(
@@ -417,9 +354,9 @@ mod tests {
         snap.peaks = [0; 4];
         state.tick(Some(&snap), 0.02);
         assert!(
-            max_peak(&state) + 0.02 >= peak * 0.9,
-            "a new quiet window snapped the cap off {}",
-            max_peak(&state)
+            max_bar(&state) > level * 0.5,
+            "a new quiet window snapped the bar off {}",
+            max_bar(&state)
         );
     }
 
@@ -461,135 +398,36 @@ mod tests {
     }
 
     #[test]
-    fn a_gain_increase_does_not_promote_a_quieter_column_target() {
-        let mut state = VizState::new();
-        state.set_column_count(3);
-        state.applied_gain = 1.0;
-        state.agc.set_display_gain(1.0);
-        state.peaks = vec![PeakMark::default(); 3];
-        for mark in &mut state.peaks {
-            mark.update(0.70, 0.0, Ballistics::spectrum());
-        }
-        // +3.6 dB of gain is +0.10 on the 36 dB display. The new target is
-        // only +0.05, so the held magnitude is still above it.
-        state.agc.set_display_gain(10f32.powf(3.6 / 20.0));
-        state.apply_bar_targets(&[0.75, 0.75, 0.75], 0.05);
-        assert!(
-            state.column_peak(0) > 0.78,
-            "quieter target replaced the held mark: {}",
-            state.column_peak(0)
-        );
-        assert!(
-            (state.column_peak(1) - state.column_peak(0)).abs() < 1.0e-4,
-            "columns diverged under the same target"
-        );
-        assert!(state.column_peak(0) + 1.0e-4 >= state.column_level(0));
-    }
-
-    #[test]
-    fn a_spike_in_one_bar_does_not_copy_its_cap_onto_a_distant_column() {
+    fn a_spike_stays_on_its_column_and_the_bar_follows_the_smoothed_level() {
         let mut state = VizState::new();
         state.set_column_count(5);
         state.apply_bar_targets(&[0.0, 0.0, 1.0, 0.0, 0.0], 0.05);
         assert!(
-            state.column_peak(2) > 0.60,
+            state.column_level(2) > 0.60,
             "center {}",
-            state.column_peak(2)
+            state.column_level(2)
         );
         assert!(
-            state.column_peak(0) < 0.05,
+            state.column_level(0) < 0.05,
             "edge took the spike: {}",
-            state.column_peak(0)
+            state.column_level(0)
         );
+        // One short frame must not finish the attack. The drawn height is the
+        // smoothed level, not the raw target.
+        state.set_column_count(1);
+        let mut fresh = VizState::new();
+        fresh.set_column_count(1);
+        fresh.apply_bar_targets(&[1.0], 0.02);
         assert!(
-            state.column_peak(1) < 0.30,
-            "neighbor cap cloned the spike: {}",
-            state.column_peak(1)
+            fresh.column_level(0) < 0.90,
+            "one short frame should not finish the attack: {}",
+            fresh.column_level(0)
         );
-        assert!(state.column_peak(1) + 1.0e-3 >= state.column_level(1));
-        let held = state.column_peak(2);
-        let hold = Ballistics::spectrum().hold;
-        let mut elapsed = 0.0f32;
-        while elapsed + 0.05 < hold {
-            state.apply_bar_targets(&[0.0; 5], 0.05);
-            elapsed += 0.05;
-            assert!(
-                state.column_peak(2) + 0.03 >= held,
-                "cap fell during the hold at {elapsed}: {held} -> {}",
-                state.column_peak(2)
-            );
-        }
-        for _ in 0..12 {
-            state.apply_bar_targets(&[0.0; 5], 0.08);
-        }
-        assert!(
-            state.column_peak(2) < held - 0.15,
-            "cap never fell: {}",
-            state.column_peak(2)
-        );
-        assert!(state.column_peak(2) + 1.0e-3 >= state.column_level(2));
-        assert!(state.column_peak(0) < 0.05);
     }
 
     #[test]
-    fn a_tone_holds_its_column_then_the_cap_falls_through_silence() {
+    fn columns_that_share_a_band_share_its_level() {
         let mut state = VizState::new();
-        state.set_column_count(BARS);
-        let mut snap = sine_snapshot(440.0, [4000, 0, 0, 0], 1);
-        state.tick(Some(&snap), 0.05);
-        let (loud, _) = (0..state.column_count)
-            .map(|index| (index, state.column_level(index)))
-            .max_by(|left, right| left.1.partial_cmp(&right.1).unwrap())
-            .unwrap();
-        let quiet = if loud < BARS / 2 { BARS - 1 } else { 0 };
-        assert!(
-            state.column_peak(loud) > state.column_peak(quiet) + 0.2,
-            "loud {} quiet {}",
-            state.column_peak(loud),
-            state.column_peak(quiet)
-        );
-        let held = state.column_peak(loud);
-        snap.stereo = [0; WINDOW * 2];
-        snap.peaks = [0; 4];
-        let hold_steps = (Ballistics::spectrum().hold / 0.05).floor() as u64;
-        for step in 0..hold_steps {
-            snap.gen = 2 + step;
-            state.tick(Some(&snap), 0.05);
-            assert!(
-                state.column_peak(loud) + 1.0e-3 >= state.column_level(loud),
-                "cap under the bar"
-            );
-        }
-        assert!(
-            state.column_peak(loud) + 0.05 >= held.min(0.95),
-            "fell inside the hold: {held} -> {}",
-            state.column_peak(loud)
-        );
-        let mid = state.column_peak(loud);
-        let mut previous = mid;
-        for step in 0..20 {
-            snap.gen = 40 + step;
-            state.tick(Some(&snap), 0.05);
-            let peak = state.column_peak(loud);
-            assert!(
-                peak <= previous + 1.0e-4,
-                "cap rose while falling: {previous} -> {peak}"
-            );
-            assert!(peak + 1.0e-3 >= state.column_level(loud));
-            previous = peak;
-        }
-        assert!(
-            state.column_peak(loud) < mid - 0.08,
-            "silence did not drop the cap: {mid} -> {}",
-            state.column_peak(loud)
-        );
-        assert!(state.column_peak(quiet) < state.column_peak(loud).max(0.2));
-    }
-
-    #[test]
-    fn columns_that_share_a_band_share_its_cap() {
-        let mut state = VizState::new();
-        // Two display columns per band.
         state.set_column_count(BARS * 2);
         let mut raw = vec![0.0; BARS];
         raw[10] = 1.0;
@@ -597,40 +435,22 @@ mod tests {
         assert_eq!(column_band(20, BARS * 2, BARS), 10);
         assert_eq!(column_band(21, BARS * 2, BARS), 10);
         assert!(
-            (state.column_peak(20) - state.column_peak(21)).abs() < 1.0e-6,
-            "shared band drew two caps: {} {}",
-            state.column_peak(20),
-            state.column_peak(21)
+            (state.column_level(20) - state.column_level(21)).abs() < 1.0e-6,
+            "shared band drew two heights: {} {}",
+            state.column_level(20),
+            state.column_level(21)
         );
-        let held = state.column_peak(20);
-        // A narrower panel remaps columns. The cap stays on band 10.
+        let held = state.column_level(20);
         state.set_column_count(BARS);
         assert!(
-            (state.column_peak(10) - held).abs() < 1.0e-4,
-            "resize moved the cap: {held} -> {}",
-            state.column_peak(10)
+            (state.column_level(10) - held).abs() < 1.0e-4,
+            "resize moved the bar: {held} -> {}",
+            state.column_level(10)
         );
         assert!(
-            state.column_peak(9) < held - 0.15,
-            "neighbor took the cap: {} vs {held}",
-            state.column_peak(9)
-        );
-    }
-
-    #[test]
-    fn a_cap_tracks_the_smoothed_bar_rather_than_the_raw_frame() {
-        let mut state = VizState::new();
-        state.set_column_count(1);
-        state.apply_bar_targets(&[1.0], 0.02);
-        let level = state.column_level(0);
-        let peak = state.column_peak(0);
-        assert!(
-            level < 0.90,
-            "one short frame should not finish the attack: {level}"
-        );
-        assert!(
-            (peak - level).abs() < 0.02,
-            "cap latched the raw frame instead of the bar: peak {peak} level {level}"
+            state.column_level(9) < held - 0.15,
+            "neighbor took the bar: {} vs {held}",
+            state.column_level(9)
         );
     }
 
@@ -660,7 +480,7 @@ mod tests {
         let mut snap = hop_snapshot(440.0, 24 * crate::viz::HOP, 100);
         snap.stereo = [0; WINDOW * 2];
         let baseline: Vec<f32> = (0..state.column_count)
-            .map(|index| state.column_peak(index))
+            .map(|index| state.column_level(index))
             .collect();
         let mut previous = baseline[loud];
         let mut fell = false;
@@ -668,28 +488,28 @@ mod tests {
             snap.gen = 200 + step;
             state.tick(Some(&snap), 0.05);
             for (index, before) in baseline.iter().copied().enumerate() {
-                let peak = state.column_peak(index);
+                let level = state.column_level(index);
                 assert!(
-                    peak <= before + 0.02,
-                    "column {index} rose during silence: {before} -> {peak}"
+                    level <= before + 0.02,
+                    "column {index} rose during silence: {before} -> {level}"
                 );
             }
-            let peak = state.column_peak(loud);
-            if peak + 0.01 < previous {
+            let level = state.column_level(loud);
+            if level + 0.01 < previous {
                 fell = true;
             }
             assert!(
-                peak <= previous + 1.0e-4,
-                "column {loud} rose during the fall: {previous} -> {peak}"
+                level <= previous + 1.0e-4,
+                "column {loud} rose during the fall: {previous} -> {level}"
             );
-            previous = peak;
+            previous = level;
         }
-        assert!(fell, "the cap never fell after the tone stopped");
+        assert!(fell, "the bar never fell after the tone stopped");
         assert!(
-            state.column_peak(loud) < baseline[loud] - 0.08,
-            "silence did not drop the cap: {} -> {}",
+            state.column_level(loud) < baseline[loud] - 0.08,
+            "silence did not drop the bar: {} -> {}",
             baseline[loud],
-            state.column_peak(loud)
+            state.column_level(loud)
         );
     }
 
@@ -720,12 +540,6 @@ mod tests {
     fn max_bar(state: &VizState) -> f32 {
         (0..state.bar_count())
             .map(|index| state.bar(index))
-            .fold(0.0f32, f32::max)
-    }
-
-    fn max_peak(state: &VizState) -> f32 {
-        (0..state.bar_count())
-            .map(|index| state.bar_peak(index))
             .fold(0.0f32, f32::max)
     }
 }

@@ -6,7 +6,8 @@
 //! The "before" painter is the previous column code: the top cell of the bar
 //! was recolored as the peak, and a peak that landed in a higher cell was a
 //! bottom-anchored partial block. The "after" frames go through
-//! [`omatrack::viz::smooth_spectrum`] and [`omatrack::viz::spectrum_column`].
+//! [`omatrack::viz::smooth_spectrum`] and [`omatrack::viz::spectrum_column`]
+//! and draw the smoothed bar with no cap.
 
 use std::env;
 use std::fs;
@@ -49,13 +50,12 @@ fn main() {
         let new_cols: Vec<Vec<(char, Ink)>> = new_meters
             .iter()
             .map(|meter| {
-                spectrum_column(ROWS, meter.level, meter.peak)
+                spectrum_column(ROWS, meter.level)
                     .into_iter()
                     .map(|cell| {
                         let ink = match cell.ink {
                             ColumnInk::Empty => Ink::Empty,
                             ColumnInk::Body => Ink::Body,
-                            ColumnInk::Peak => Ink::Peak,
                         };
                         (cell.glyph, ink)
                     })
@@ -123,7 +123,6 @@ fn old_spectrum() -> Ballistics {
         hold: 0.22,
         peak_decay: 0.40,
         linear_peak: false,
-        peak_gravity: 0.0,
     }
 }
 

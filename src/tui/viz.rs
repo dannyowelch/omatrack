@@ -22,23 +22,41 @@ pub(crate) const PANEL_MIN_HEIGHT: u16 = 28;
 
 /// Outer height of the spectrum pane, including its border.
 ///
-/// Content rows scale with the terminal: 6 on a 30-row screen (so the pattern
-/// still has a few rows), 10 around 40, and 12 when there is more room.
+/// Bar rows are the v0.2.2 pane: 4 on a 30-line terminal (outer 6). That is
+/// the smallest height that still fits meters 1–4, so a 30-line window spends
+/// 6/30 on the pane. From 40 lines up the pane also stays within 15% of the
+/// window, growing to 5 bars around 50 lines and stopping at 6.
 /// Shorter than [`PANEL_MIN_HEIGHT`] draws no panel.
 pub(crate) fn panel_height(term_height: u16) -> u16 {
     if term_height < PANEL_MIN_HEIGHT {
         return 0;
     }
-    let content = if term_height < 32 {
-        6
-    } else if term_height < 37 {
-        8
-    } else if term_height < 45 {
-        10
+    let content = if term_height < 48 {
+        4
+    } else if term_height < 56 {
+        5
     } else {
-        12
+        6
     };
-    content + 2
+    let outer = content + 2;
+    if term_height >= 40 {
+        let cap = u16::try_from(u32::from(term_height) * 15 / 100).unwrap_or(u16::MAX);
+        outer.min(cap.max(6))
+    } else {
+        outer
+    }
+}
+
+/// Columns reserved for the four channel meters, or 0 when the pane is too
+/// narrow to show a bar beside the label.
+fn meter_columns(width: usize) -> usize {
+    if width >= 36 {
+        14
+    } else if width >= 20 {
+        8
+    } else {
+        0
+    }
 }
 
 /// Spectrum bars and four channel meters.
@@ -48,8 +66,26 @@ pub(crate) fn draw_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: Th
         .border_style(paint(theme.border, theme.background, false))
         .style(theme.fill());
     let inner = block.inner(area);
-    let lines = panel_lines(inner, app, theme);
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let meter_w = u16::try_from(meter_columns(usize::from(inner.width))).unwrap_or(0);
+    let spectrum = Rect {
+        width: inner.width.saturating_sub(meter_w),
+        ..inner
+    };
+    let meters = Rect {
+        x: inner.x.saturating_add(spectrum.width),
+        width: meter_w,
+        ..inner
+    };
+    let lines = spectrum_lines(spectrum, app, theme);
+    frame.render_widget(Paragraph::new(lines).style(theme.fill()), spectrum);
+    if meter_w > 0 {
+        let lines = meter_lines(meters, app, theme);
+        frame.render_widget(Paragraph::new(lines).style(theme.fill()), meters);
+    }
 }
 
 /// Vectorscope over `area`, with the transport left to the caller.
@@ -90,63 +126,48 @@ pub(crate) fn draw_scope_view(frame: &mut Frame, area: Rect, app: &App, theme: T
     frame.render_widget(Paragraph::new(lines).style(theme.fill()), canvas_area);
 }
 
-fn panel_lines(area: Rect, app: &mut App, theme: Theme) -> Vec<Line<'static>> {
+fn spectrum_lines(area: Rect, app: &mut App, theme: Theme) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
-    let width = usize::from(area.width);
-    if rows == 0 || width == 0 {
-        return Vec::new();
-    }
-    let meter_w = if width >= 36 { 14 } else { 0 };
-    let columns = width.saturating_sub(meter_w);
-    if columns == 0 {
+    let columns = usize::from(area.width);
+    if rows == 0 || columns == 0 {
         return Vec::new();
     }
     let empty = theme.fill();
     let mut grid = vec![vec![(' ', empty); columns]; rows];
-    // Peaks are tracked per displayed column, after the bar values are smoothed.
     app.viz.set_column_count(columns);
     for column in 0..columns {
-        let level = app.viz.column_level(column);
-        let peak = app.viz.column_peak(column).max(level);
-        paint_column(&mut grid, column, level, peak, theme);
+        paint_column(&mut grid, column, app.viz.column_level(column), theme);
     }
+    grid.iter().map(|row| Line::from(group(row))).collect()
+}
+
+/// One row per channel, bottom-aligned, so a 4-row pane shows every meter.
+fn meter_for_row(row: usize, rows: usize) -> Option<usize> {
+    let shown = rows.min(4);
+    let start = rows.saturating_sub(shown);
+    let index = row.checked_sub(start)?;
+    (index < shown).then_some(index)
+}
+
+fn meter_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
+    let rows = usize::from(area.height);
+    let width = usize::from(area.width);
     let mut lines = Vec::with_capacity(rows);
-    for (row, cells) in grid.iter().enumerate() {
-        let mut spans = group(cells);
-        if meter_w > 0 {
-            if let Some(channel) = meter_for_row(row, rows) {
-                spans.push(Span::styled(" ", theme.dim()));
-                // " " plus "N " leaves the rest of the reserved meter column.
-                push_meter(&mut spans, app, channel, meter_w.saturating_sub(3), theme);
-            }
+    for row in 0..rows {
+        if let Some(channel) = meter_for_row(row, rows) {
+            lines.push(meter_line(app, channel, width, theme));
+        } else {
+            lines.push(Line::from(Span::styled(" ".repeat(width), theme.fill())));
         }
-        lines.push(Line::from(spans));
     }
     lines
 }
 
-fn meter_for_row(row: usize, rows: usize) -> Option<usize> {
-    if rows < 4 {
-        return (row < rows).then_some(row);
-    }
-    let start = rows.saturating_sub(4);
-    let index = row.checked_sub(start)?;
-    (index < 4).then_some(index)
-}
-
-fn paint_column(
-    grid: &mut [Vec<(char, Style)>],
-    column: usize,
-    level: f32,
-    peak: f32,
-    theme: Theme,
-) {
+fn paint_column(grid: &mut [Vec<(char, Style)>], column: usize, level: f32, theme: Theme) {
     let rows = grid.len();
-    let cap = paint(theme.spectrum_peak, theme.background, false);
-    for (row, cell) in spectrum_column(rows, level, peak).into_iter().enumerate() {
+    for (row, cell) in spectrum_column(rows, level).into_iter().enumerate() {
         let from_bottom = rows - 1 - row;
         let style = match cell.ink {
-            ColumnInk::Peak => cap,
             ColumnInk::Body => body_style(theme, from_bottom, rows),
             ColumnInk::Empty => theme.fill(),
         };
@@ -186,53 +207,28 @@ fn lerp(from: u8, to: u8, t: f32) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }
 
-fn push_meter(
-    spans: &mut Vec<Span<'static>>,
-    app: &App,
-    channel: usize,
-    width: usize,
-    theme: Theme,
-) {
-    let (level, peak) = app.viz.meter(channel);
+fn meter_line(app: &App, channel: usize, width: usize, theme: Theme) -> Line<'static> {
+    let (level, _) = app.viz.meter(channel);
     let label = format!("{} ", channel + 1);
     let color = theme.channels.get(channel).copied().unwrap_or(theme.text);
-    spans.push(Span::styled(label, paint(color, theme.background, true)));
-    let body = paint(color, theme.background, false);
-    let cap = paint(theme.spectrum_peak, theme.background, false);
-    let bar_w = width;
+    let mut spans = vec![Span::styled(
+        label.clone(),
+        paint(color, theme.background, true),
+    )];
+    let bar_w = width.saturating_sub(label.chars().count());
     if bar_w == 0 {
-        return;
+        return Line::from(spans);
     }
+    let body = paint(color, theme.background, false);
     let total = bar_w * 8;
     let steps = quantize(level, total);
-    let peak_steps = quantize(peak.max(level), total);
-    let mut buf = String::new();
-    let mut current = body;
-    let flush = |spans: &mut Vec<Span<'static>>, buf: &mut String, style: Style| {
-        if !buf.is_empty() {
-            spans.push(Span::styled(std::mem::take(buf), style));
-        }
-    };
+    let mut chars = String::with_capacity(bar_w);
     for cell in 0..bar_w {
-        let start = cell * 8;
-        let filled = steps.saturating_sub(start).min(8);
-        let floating = peak_steps > steps && peak_steps > start && peak_steps <= start + 8;
-        let (glyph, style) = if filled == 0 && floating {
-            ('│', cap)
-        } else if filled == 0 {
-            (' ', body)
-        } else if cell == peak_steps.saturating_sub(1) / 8 {
-            (HBLOCK[filled], cap)
-        } else {
-            (HBLOCK[filled], body)
-        };
-        if style != current {
-            flush(spans, &mut buf, current);
-            current = style;
-        }
-        buf.push(glyph);
+        let filled = steps.saturating_sub(cell * 8).min(8);
+        chars.push(HBLOCK[filled]);
     }
-    flush(spans, &mut buf, current);
+    spans.push(Span::styled(chars, body));
+    Line::from(spans)
 }
 
 fn scope_line(canvas: &crate::viz::ScopeCanvas, y: usize, theme: Theme) -> Line<'static> {
@@ -309,73 +305,214 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    use crate::viz::{PEAK_CAP_HIGH, PEAK_CAP_LOW};
+    use crate::module::{Cell, Module, Tag};
+    use crate::player::{Playback, PlayerConfig};
+    use crate::viz::{VizSnapshot, WINDOW};
 
     #[test]
-    fn the_panel_grows_with_the_terminal_and_stays_in_range() {
+    fn the_panel_stays_short_and_within_about_fifteen_percent() {
         assert_eq!(panel_height(24), 0);
         assert_eq!(panel_height(27), 0);
-        // 6 content rows on a 30-line terminal, 10 at 40, 12 above 45.
-        assert_eq!(panel_height(30), 8);
-        assert_eq!(panel_height(36), 10);
-        assert_eq!(panel_height(40), 12);
-        assert_eq!(panel_height(80), 14);
-        for height in 28..60 {
+        // 4 bar rows on a 30-line terminal: the v0.2.2 pane (outer 6).
+        assert_eq!(panel_height(30), 6);
+        assert_eq!(panel_height(36), 6);
+        // 40 lines is exactly 15%. 50 lines gains one bar row and stays under.
+        assert_eq!(panel_height(40), 6);
+        assert_eq!(panel_height(50), 7);
+        assert_eq!(panel_height(80), 8);
+        for height in 28..40 {
+            assert_eq!(panel_height(height), 6, "height {height}");
+        }
+        for height in 40..120 {
             let outer = panel_height(height);
-            let content = outer - 2;
             assert!(
-                (6..=12).contains(&content),
-                "height {height} content {content}"
+                u32::from(outer) * 100 <= u32::from(height) * 15,
+                "height {height} outer {outer} is over 15%"
             );
+            assert!((6..=8).contains(&outer), "height {height} outer {outer}");
         }
     }
 
     #[test]
-    fn the_peak_cap_renders_as_a_thin_glyph_in_its_own_cell() {
+    fn spectrum_columns_are_bars_without_a_cap() {
         let theme = Theme::protracker();
         let rows = 4;
-        let columns = 3;
-        let mut grid = vec![vec![(' ', theme.fill()); columns]; rows];
-        // 0.50 → 16 eighths (bar fills the bottom two rows). 0.62 → 20 eighths,
-        // lower half of the next cell: ▁ one row above the bar.
-        // 0.90 → 29 eighths, upper half of the top cell: ▔.
-        // 0.40 and 0.45 share a cell, so that column has no floating cap.
-        let levels = [0.50_f32, 0.50, 0.40];
-        let peaks = [0.62_f32, 0.90, 0.45];
-        for (column, (level, peak)) in levels.into_iter().zip(peaks).enumerate() {
-            paint_column(&mut grid, column, level, peak, theme);
-        }
-        let lines: Vec<Line<'static>> = grid.iter().map(|row| Line::from(group(row))).collect();
-        let backend = TestBackend::new(columns as u16, rows as u16);
-        let mut terminal = Terminal::new(backend).expect("test terminal");
-        terminal
-            .draw(|frame| {
-                frame.render_widget(Paragraph::new(lines), frame.area());
-            })
-            .expect("draw");
-        let buffer = terminal.backend().buffer().clone();
-        let expect = [Some((1usize, PEAK_CAP_LOW)), Some((0, PEAK_CAP_HIGH)), None];
-        for (column, expected) in expect.into_iter().enumerate() {
-            let mut peak_at = None;
-            for row in 0..rows {
-                let cell = &buffer[(column as u16, row as u16)];
-                if cell.fg != theme.spectrum_peak || cell.symbol() == " " {
-                    continue;
-                }
-                let glyph = cell.symbol().chars().next().unwrap();
+        let mut grid = vec![vec![(' ', theme.fill()); 1]; rows];
+        paint_column(&mut grid, 0, 0.50, theme);
+        assert!(grid.iter().all(|row| {
+            let (glyph, style) = row[0];
+            style != paint(theme.spectrum_peak, theme.background, false)
+                && glyph != '▔'
+                && glyph != '│'
+        }));
+        // 0.50 of four rows is two full blocks and nothing above them.
+        assert_eq!(grid[0][0].0, ' ');
+        assert_eq!(grid[1][0].0, ' ');
+        assert_eq!(grid[2][0].0, '█');
+        assert_eq!(grid[3][0].0, '█');
+    }
+
+    #[test]
+    fn a_playing_channel_meter_has_nonzero_height_on_a_short_panel() {
+        let mut app = loud_channel_app();
+        assert!(app.viz.meter(0).0 > 0.4, "level {}", app.viz.meter(0).0);
+        // 30-line layout: outer pane is 6, so the bars and meters share 4 rows.
+        for &(width, height) in &[(80u16, 30u16), (100, 40), (100, 50)] {
+            let buffer = render_app(&mut app, width, height);
+            let panel = spectrum_rows(&buffer);
+            let outer = panel_height(height);
+            assert_eq!(
+                panel.len(),
+                usize::from(outer),
+                "{width}x{height} spectrum rows:\n{}",
+                text_of(&buffer)
+            );
+            assert!(
+                u32::from(outer) * 100 <= u32::from(height) * 20,
+                "{height} -> {outer}"
+            );
+            let content = &panel[1..panel.len() - 1];
+            assert!(
+                content.len() >= 4,
+                "meters need 4 rows, got {} at {height}",
+                content.len()
+            );
+            let mut labels = Vec::new();
+            for (row_index, row) in content.iter().enumerate() {
+                let (spectrum, gutter) = split_meter(row);
                 assert!(
-                    glyph == PEAK_CAP_LOW || glyph == PEAK_CAP_HIGH,
-                    "column {column} row {row} drew {glyph}, a tall block"
+                    !gutter.contains('▔') && !gutter.contains('│'),
+                    "cap in the meter gutter at {width}x{height} row {row_index}: {gutter}"
                 );
-                assert_ne!(glyph, '▄');
-                assert_ne!(glyph, '█');
-                assert!(peak_at.is_none(), "two caps in column {column}");
-                peak_at = Some((row, glyph));
+                assert!(
+                    !spectrum.contains('▔') && !spectrum.contains('│'),
+                    "cap in the spectrum at {width}x{height}: {spectrum}"
+                );
+                if let Some(channel) = gutter.chars().find(|ch| ('1'..='4').contains(ch)) {
+                    let eighths = bar_eighths(&gutter);
+                    labels.push(channel);
+                    if channel == '1' {
+                        assert!(
+                            eighths > 0,
+                            "channel 1 meter has no bar at {width}x{height}: {gutter:?}\n{}",
+                            text_of(&buffer)
+                        );
+                    }
+                }
             }
-            assert_eq!(peak_at, expected, "column {column}");
+            assert_eq!(
+                labels,
+                vec!['1', '2', '3', '4'],
+                "meters clipped at {width}x{height}: {labels:?}\n{}",
+                text_of(&buffer)
+            );
         }
-        // The tall cap must not bleed into the short column.
-        let leaked = &buffer[(2, 0)];
-        assert_ne!(leaked.fg, theme.spectrum_peak);
+    }
+
+    fn loud_channel_app() -> App {
+        let mut module = Module::new(Tag::Mk);
+        module.set_title("Meter").unwrap();
+        module.song_length = 1;
+        module.order[0] = 0;
+        module.resize_patterns();
+        module.samples[0].set_name("tone").unwrap();
+        module.samples[0].volume = 64;
+        module.samples[0].set_data(vec![100; 4000]).unwrap();
+        module.patterns[0].rows[0][0] = Cell {
+            sample: 1,
+            period: 428,
+            effect: 0,
+            param: 0,
+        };
+        let mut playback = Playback::new(PlayerConfig::default());
+        playback.start(&module, 0, 0);
+        let mut pcm = vec![0i16; WINDOW * 2];
+        playback.render(&module, &mut pcm);
+        let peaks = playback.channel_peaks();
+        assert!(peaks[0] > 1_000, "channel did not play: {peaks:?}");
+        let mut stereo = [0i16; WINDOW * 2];
+        stereo.copy_from_slice(&pcm[..WINDOW * 2]);
+        let mut app = App::new(module);
+        let snap = VizSnapshot {
+            stereo,
+            peaks,
+            rate: 44_100,
+            gen: 1,
+        };
+        app.tick_viz(Some(&snap), 0.05);
+        app
+    }
+
+    fn render_app(app: &mut App, width: u16, height: u16) -> ratatui::buffer::Buffer {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| crate::tui::draw(frame, app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn text_of(buf: &ratatui::buffer::Buffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                out.push_str(buf[(x, y)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// Spectrum pane rows, including the border, top to bottom.
+    fn spectrum_rows(buf: &ratatui::buffer::Buffer) -> Vec<String> {
+        let mut rows = Vec::new();
+        let mut started = false;
+        for y in 0..buf.area.height {
+            let mut line = String::new();
+            for x in 0..buf.area.width {
+                line.push_str(buf[(x, y)].symbol());
+            }
+            if !started {
+                if line.contains("Spectrum") {
+                    started = true;
+                    rows.push(line);
+                }
+                continue;
+            }
+            rows.push(line.clone());
+            if line.contains("Play") || line.contains("Stop") || line.contains("VIEW") {
+                rows.pop();
+                break;
+            }
+        }
+        rows
+    }
+
+    /// Spectrum columns and the meter gutter, without the pane's borders.
+    fn split_meter(line: &str) -> (String, String) {
+        let chars: Vec<char> = line.chars().collect();
+        if chars.len() < 16 {
+            return (String::new(), chars.into_iter().collect());
+        }
+        let meter_start = chars.len() - 1 - 14;
+        let spectrum: String = chars[1..meter_start].iter().collect();
+        let gutter: String = chars[meter_start..chars.len() - 1].iter().collect();
+        (spectrum, gutter)
+    }
+
+    fn bar_eighths(gutter: &str) -> usize {
+        gutter.chars().map(eighths_of).sum()
+    }
+
+    fn eighths_of(glyph: char) -> usize {
+        match glyph {
+            '▏' => 1,
+            '▎' => 2,
+            '▍' => 3,
+            '▌' => 4,
+            '▋' => 5,
+            '▊' => 6,
+            '▉' => 7,
+            '█' => 8,
+            _ => 0,
+        }
     }
 }
