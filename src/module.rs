@@ -2,7 +2,8 @@
 //!
 //! This is the in-memory module, independent of the terminal and of playback.
 //! [`crate::player::Playback`] borrows a [`Module`] and keeps voice state in
-//! its own type. Editing should mutate this document (with an undo stack beside it).
+//! its own type. [`crate::edit::Editor`] mutates this document and owns the
+//! undo stack.
 //!
 //! Fixed-width title and sample names keep their raw bytes so a parse/write
 //! round trip can be identical. [`Module::display_title`] and

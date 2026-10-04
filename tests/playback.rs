@@ -609,6 +609,18 @@ fn showcase_plays_once_and_the_scale_is_in_the_left_channel() {
     assert_eq!(u32::from_le_bytes(bytes[24..28].try_into().unwrap()), rate);
 }
 
+#[test]
+fn preview_plays_one_sample_through_the_mixer() {
+    let module = tone(428, 0, 0);
+    let pcm = omatrack::player::render_preview(&module, 1, 428, 0, 8_000, 2_000);
+    assert_eq!(pcm.len(), 4_000);
+    assert!(pcm.iter().any(|sample| *sample != 0));
+    let silent = omatrack::player::render_preview(&module, 2, 428, 0, 8_000, 200);
+    assert!(silent.iter().all(|sample| *sample == 0));
+    let no_note = omatrack::player::render_preview(&module, 1, 0, 0, 8_000, 200);
+    assert!(no_note.iter().all(|sample| *sample == 0));
+}
+
 /// Goertzel power of the left channel over `frames` starting at `start`.
 fn band_power(pcm: &[i16], rate: u32, start: usize, frames: usize, freq: f64) -> f64 {
     let end = start + frames;

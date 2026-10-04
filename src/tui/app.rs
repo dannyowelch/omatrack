@@ -1,10 +1,17 @@
-//! View state for the read-only tracker.
+//! Cursor, edit mode, and key bindings.
 //!
-//! Playback (milestone 2) and editing (milestone 3) should sit beside this:
-//! the mixer borrows [`Module`](crate::Module), and edit commands mutate it.
-//! [`App`] only remembers what the screen is showing.
+//! [`crate::edit::Editor`] mutates the module. [`App`] remembers the cursor,
+//! the block selection, the clipboard, and whether the song is playing.
 
-use crate::module::{Cell, Module, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT};
+use std::path::PathBuf;
+
+use crate::edit::{
+    clamp_octave, clamp_step, editable_text, is_name_char, period_at, semitone_from_key, CellRange,
+    Clipboard, Editor, Field, PatternCursor, Place, Selection, DEFAULT_OCTAVE, DEFAULT_STEP,
+};
+use crate::module::{
+    Cell, Module, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT, SAMPLE_NAME_LEN, TITLE_LEN,
+};
 use crate::player::{DEFAULT_SPEED, DEFAULT_TEMPO};
 
 /// Which pane receives movement keys.
@@ -14,6 +21,8 @@ pub enum Focus {
     Pattern,
     /// The instrument list.
     Samples,
+    /// The order list in the song header.
+    Order,
 }
 
 /// A key the view understands, after the terminal crate has been translated.
@@ -43,23 +52,61 @@ pub enum Key {
     BackTab,
     /// Escape.
     Esc,
-    /// Ctrl-C or Ctrl-Q.
-    CtrlC,
+    /// Enter.
+    Enter,
+    /// Backspace.
+    Backspace,
+    /// Delete.
+    Delete,
+    /// Insert.
+    Insert,
+    /// Function key, starting at 1.
+    F(u8),
+    /// Ctrl plus a letter.
+    Ctrl(char),
+    /// Ctrl-Backspace.
+    CtrlBackspace,
+    /// Ctrl-Delete.
+    CtrlDelete,
+    /// Ctrl-Insert.
+    CtrlInsert,
+    /// Alt plus a letter or digit.
+    Alt(char),
+    /// Alt-Up.
+    AltUp,
+    /// Alt-Down.
+    AltDown,
+    /// Alt-Left.
+    AltLeft,
+    /// Alt-Right.
+    AltRight,
 }
 
-/// One change to the view. Editing commands can grow this enum later.
+/// One change to the view or the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    /// Leave the UI.
-    Quit,
+    /// Quit, or ask first when the song is modified.
+    QuitAsk,
+    /// Quit and drop unsaved edits.
+    QuitDiscard,
+    /// Write the file, then quit.
+    SaveAndQuit,
+    /// Write the file.
+    Save,
     /// Move the pattern row by `delta`, clamped to `0..64`.
     MoveRow(isize),
     /// Move the channel cursor by `delta`, clamped to `0..4`.
     MoveChannel(isize),
+    /// Move one cell field left or right, crossing channels.
+    MoveField(isize),
     /// Jump to row 0.
     FirstRow,
     /// Jump to row 63.
     LastRow,
+    /// Next channel, wrapping, keeping the field.
+    NextChannel,
+    /// Previous channel, wrapping, keeping the field.
+    PrevChannel,
     /// Move through the played order list. The viewed pattern follows.
     MoveOrder(isize),
     /// Move to another pattern without changing the order position.
@@ -74,20 +121,152 @@ pub enum Command {
     FirstSample,
     /// Jump to instrument 31.
     LastSample,
+    /// Jump to the first played order position.
+    FirstOrder,
+    /// Jump to the last played order position.
+    LastOrder,
     /// Start playback from the cursor, or stop it.
     TogglePlay,
     /// Silence or restore channel `0..4`.
     ToggleMute(usize),
+    /// Enter or leave edit mode.
+    ToggleEdit,
+    /// Change the piano octave by `delta`.
+    Octave(i8),
+    /// Change the edit step by `delta`.
+    Step(i8),
+    /// Enter the piano semitone (`0` is C of the current octave).
+    EnterNote(u8),
+    /// Enter a sample or effect digit.
+    EnterDigit(u8),
+    /// Clear the cell, or one digit when the cursor is on a digit.
+    ClearUnderCursor,
+    /// Clear the cell one edit-step up and move there.
+    BackspaceLine,
+    /// Insert an empty cell in this channel.
+    InsertChannelRow,
+    /// Delete this channel's cell and shift the channel up.
+    DeleteChannelRow,
+    /// Insert an empty row in every channel.
+    InsertPatternRow,
+    /// Delete the row in every channel.
+    DeletePatternRow,
+    /// Empty the current channel.
+    ClearChannel,
+    /// Empty the current pattern.
+    ClearPattern,
+    /// Start a block at the cursor, or clear it.
+    ToggleBlock,
+    /// Select every cell in the current pattern.
+    SelectAll,
+    /// Drop the block highlight.
+    ClearBlock,
+    /// Copy the block, or the current cell.
+    Copy,
+    /// Copy the block and clear it.
+    Cut,
+    /// Paste the clipboard at the cursor.
+    Paste,
+    /// Transpose the block, or the current cell, by semitones.
+    Transpose(i32),
+    /// Undo the last edit.
+    Undo,
+    /// Redo the last undone edit.
+    Redo,
+    /// Show the key overlay.
+    ShowHelp,
+    /// Close help, the quit question, or text entry.
+    CloseOverlay,
+    /// Change the pattern number at the current order position.
+    OrderPattern(i32),
+    /// Insert an order entry at the cursor.
+    InsertOrder,
+    /// Delete the current order entry.
+    DeleteOrder,
+    /// Change the played song length.
+    SongLength(i32),
+    /// Append an empty pattern and point the current order entry at it.
+    NewPattern,
+    /// Edit the song title.
+    BeginTitle,
+    /// Edit the current sample name.
+    BeginSampleName,
+    /// Append a character to the text prompt.
+    TextPush(char),
+    /// Drop the last character in the text prompt.
+    TextBackspace,
+    /// Store the text prompt.
+    TextConfirm,
+    /// Drop the text prompt.
+    TextCancel,
+}
+
+/// What the audio side should do after [`App::apply`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The view changed and the song did not.
+    None,
+    /// The module changed.
+    Edited,
+    /// A note was written and should be heard when playback is stopped.
+    Preview {
+        /// Instrument number, `1..=31`.
+        sample: u8,
+        /// Finetune-0 period.
+        period: u16,
+        /// Channel the note was written on.
+        channel: usize,
+    },
+    /// Play or stop.
+    Play,
+    /// Channel mute flipped.
+    Mute(usize),
+    /// Write the module to its path.
+    Save,
+    /// Write the module, then quit if the write worked.
+    SaveAndQuit,
+}
+
+/// What is covering the tracker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Overlay {
+    /// The pattern and the lists.
+    None,
+    /// Key binding list.
+    Help,
+    /// Ask before discarding edits.
+    Quit,
+    /// Title or sample name.
+    Text {
+        /// Which field is being typed.
+        target: TextTarget,
+        /// Characters typed so far.
+        buffer: String,
+    },
+}
+
+/// Title or one sample name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TextTarget {
+    /// The 20-byte song title.
+    Title,
+    /// A sample name. The index is zero-based.
+    Sample(usize),
 }
 
 const PATTERN_PAGE: isize = 16;
 const SAMPLE_PAGE: isize = 8;
 
-/// Read-only viewer state.
+/// Tracker state: the document, the cursor, and the undo stack.
 #[derive(Debug)]
 pub struct App {
     pub(crate) module: Module,
+    pub(crate) path: PathBuf,
     pub(crate) focus: Focus,
+    pub(crate) editing: bool,
+    pub(crate) field: Field,
+    pub(crate) octave: u8,
+    pub(crate) step: u8,
     pub(crate) order_pos: usize,
     pub(crate) view_pattern: usize,
     pub(crate) row: usize,
@@ -105,16 +284,31 @@ pub struct App {
     pub(crate) muted: [bool; CHANNELS],
     /// Last failure from opening the audio device, shown in the transport bar.
     pub(crate) audio_error: Option<String>,
+    pub(crate) message: Option<String>,
+    pub(crate) overlay: Overlay,
+    pub(crate) selection: Option<Selection>,
+    clipboard: Clipboard,
+    editor: Editor,
     quit: bool,
 }
 
 impl App {
-    /// Open `module` on order position 0, row 0, channel 1.
+    /// Open `module` on order position 0, row 0, channel 1, in browse mode.
     pub fn new(module: Module) -> Self {
+        Self::open(module, PathBuf::new())
+    }
+
+    /// Open `module` and remember `path` for Ctrl-S.
+    pub fn open(module: Module, path: PathBuf) -> Self {
         let view_pattern = usize::from(module.order[0]);
         Self {
             module,
+            path,
             focus: Focus::Pattern,
+            editing: false,
+            field: Field::Note,
+            octave: DEFAULT_OCTAVE,
+            step: DEFAULT_STEP,
             order_pos: 0,
             view_pattern,
             row: 0,
@@ -127,21 +321,34 @@ impl App {
             tempo: DEFAULT_TEMPO,
             muted: [false; CHANNELS],
             audio_error: None,
+            message: None,
+            overlay: Overlay::None,
+            selection: None,
+            clipboard: Clipboard::default(),
+            editor: Editor::new(),
             quit: false,
         }
     }
 
     /// Snap the view to the row the replayer is mixing.
     pub(crate) fn follow(&mut self, order: usize, row: usize, speed: u8, tempo: u8) {
-        self.speed = speed;
-        self.tempo = tempo;
+        self.set_clock(speed, tempo);
         let len = self.song_len();
         self.order_pos = order.min(len.saturating_sub(1));
         let pattern = usize::from(self.module.order[self.order_pos]);
-        if pattern < self.module.patterns.len() {
-            self.view_pattern = pattern;
+        if pattern != self.view_pattern {
+            self.selection = None;
+            if pattern < self.module.patterns.len() {
+                self.view_pattern = pattern;
+            }
         }
         self.row = row.min(ROWS - 1);
+    }
+
+    /// Remember speed and tempo without moving the cursor.
+    pub(crate) fn set_clock(&mut self, speed: u8, tempo: u8) {
+        self.speed = speed;
+        self.tempo = tempo;
     }
 
     /// Remember that the audio device could not be opened, and leave playback stopped.
@@ -150,44 +357,108 @@ impl App {
         self.audio_error = Some(message);
     }
 
+    /// Show `message` on the status line until the next key.
+    pub(crate) fn set_message(&mut self, message: impl Into<String>) {
+        self.message = Some(message.into());
+    }
+
+    /// Leave the UI even if a prompt is up.
+    pub(crate) fn quit_now(&mut self) {
+        self.overlay = Overlay::None;
+        self.quit = true;
+    }
+
     /// Whether the user asked to quit.
     pub fn should_quit(&self) -> bool {
         self.quit
     }
 
+    /// The document has edits since the last successful save.
+    pub fn is_dirty(&self) -> bool {
+        self.editor.is_dirty()
+    }
+
+    /// Write the module to the path it was opened from.
+    pub fn save(&mut self) -> Result<(), String> {
+        if self.path.as_os_str().is_empty() {
+            return Err("there is no file to save".to_string());
+        }
+        self.module
+            .save(&self.path)
+            .map_err(|err| err.to_string())?;
+        self.editor.mark_saved();
+        Ok(())
+    }
+
     /// Apply one command. Movement past either end sticks.
-    pub fn apply(&mut self, command: Command) {
+    pub fn apply(&mut self, command: Command) -> Outcome {
+        self.message = None;
         match command {
-            Command::Quit => self.quit = true,
-            Command::MoveRow(delta) => self.row = step(self.row, delta, ROWS),
-            Command::MoveChannel(delta) => self.channel = step(self.channel, delta, CHANNELS),
-            Command::FirstRow => self.row = 0,
-            Command::LastRow => self.row = ROWS - 1,
-            Command::MoveOrder(delta) => {
-                let len = self.song_len();
-                self.order_pos = step(self.order_pos, delta, len);
-                self.view_pattern = usize::from(self.module.order[self.order_pos]);
+            Command::Save => Outcome::Save,
+            Command::SaveAndQuit => {
+                self.overlay = Overlay::None;
+                Outcome::SaveAndQuit
             }
-            Command::MovePattern(delta) => {
-                let len = self.module.patterns.len();
-                self.view_pattern = step(self.view_pattern, delta, len);
+            Command::QuitAsk => self.ask_quit(),
+            Command::QuitDiscard => {
+                self.quit_now();
+                Outcome::None
             }
-            Command::NextFocus => self.focus = cycle(self.focus, true),
-            Command::PrevFocus => self.focus = cycle(self.focus, false),
-            Command::MoveSample(delta) => self.sample = step(self.sample, delta, SAMPLE_COUNT),
-            Command::FirstSample => self.sample = 0,
-            Command::LastSample => self.sample = SAMPLE_COUNT - 1,
+            Command::CloseOverlay | Command::TextCancel => {
+                self.overlay = Overlay::None;
+                Outcome::None
+            }
+            Command::ShowHelp => {
+                self.overlay = Overlay::Help;
+                Outcome::None
+            }
             Command::TogglePlay => {
                 self.playing = !self.playing;
                 if self.playing {
                     self.audio_error = None;
                 }
+                Outcome::Play
             }
             Command::ToggleMute(channel) => {
                 if let Some(muted) = self.muted.get_mut(channel) {
                     *muted = !*muted;
+                    Outcome::Mute(channel)
+                } else {
+                    Outcome::None
                 }
             }
+            Command::ToggleEdit => {
+                self.editing = !self.editing;
+                if self.editing {
+                    self.focus = Focus::Pattern;
+                    self.field = Field::Note;
+                }
+                Outcome::None
+            }
+            Command::Octave(delta) => {
+                self.octave = clamp_octave(i32::from(self.octave) + i32::from(delta));
+                Outcome::None
+            }
+            Command::Step(delta) => {
+                self.step = clamp_step(i32::from(self.step) + i32::from(delta));
+                Outcome::None
+            }
+            Command::TextPush(ch) => {
+                self.push_text(ch);
+                Outcome::None
+            }
+            Command::TextBackspace => {
+                if let Overlay::Text { buffer, .. } = &mut self.overlay {
+                    buffer.pop();
+                }
+                Outcome::None
+            }
+            Command::TextConfirm => self.confirm_text(),
+            other if is_motion(other) => {
+                self.apply_motion(other);
+                Outcome::None
+            }
+            other => self.apply_change(other),
         }
     }
 
@@ -214,50 +485,687 @@ impl App {
         let pattern = self.module.patterns.get(self.view_pattern)?;
         Some(pattern.rows[self.row][self.channel])
     }
+
+    /// Whether the block highlight covers this cell on the pattern being shown.
+    pub(crate) fn cell_selected(&self, row: usize, channel: usize) -> bool {
+        self.selection.is_some_and(|selection| {
+            selection.pattern == self.view_pattern && selection.range().contains(row, channel)
+        })
+    }
+
+    fn ask_quit(&mut self) -> Outcome {
+        if self.editor.is_dirty() {
+            self.overlay = Overlay::Quit;
+            Outcome::None
+        } else {
+            self.quit = true;
+            Outcome::None
+        }
+    }
+
+    fn apply_motion(&mut self, command: Command) {
+        match command {
+            Command::MoveRow(delta) => {
+                self.row = step(self.row, delta, ROWS);
+                self.nudge_selection();
+            }
+            Command::MoveChannel(delta) => {
+                self.channel = step(self.channel, delta, CHANNELS);
+                self.nudge_selection();
+            }
+            Command::MoveField(delta) => {
+                let (channel, field) = crate::edit::shift_field(self.channel, self.field, delta);
+                self.channel = channel;
+                self.field = field;
+                self.nudge_selection();
+            }
+            Command::FirstRow => {
+                self.row = 0;
+                self.nudge_selection();
+            }
+            Command::LastRow => {
+                self.row = ROWS - 1;
+                self.nudge_selection();
+            }
+            Command::NextChannel => {
+                self.channel = (self.channel + 1) % CHANNELS;
+                self.nudge_selection();
+            }
+            Command::PrevChannel => {
+                self.channel = (self.channel + CHANNELS - 1) % CHANNELS;
+                self.nudge_selection();
+            }
+            Command::MoveOrder(delta) => {
+                let len = self.song_len();
+                self.order_pos = step(self.order_pos, delta, len);
+                self.retarget_pattern(usize::from(self.module.order[self.order_pos]));
+            }
+            Command::MovePattern(delta) => {
+                let len = self.module.patterns.len().max(1);
+                let next = step(self.view_pattern, delta, len);
+                self.retarget_pattern(next);
+            }
+            Command::NextFocus => self.focus = cycle(self.focus, true),
+            Command::PrevFocus => self.focus = cycle(self.focus, false),
+            Command::MoveSample(delta) => self.sample = step(self.sample, delta, SAMPLE_COUNT),
+            Command::FirstSample => self.sample = 0,
+            Command::LastSample => self.sample = SAMPLE_COUNT - 1,
+            Command::FirstOrder => {
+                self.order_pos = 0;
+                self.retarget_pattern(usize::from(self.module.order[0]));
+            }
+            Command::LastOrder => {
+                self.order_pos = self.song_len().saturating_sub(1);
+                self.retarget_pattern(usize::from(self.module.order[self.order_pos]));
+            }
+            _ => {}
+        }
+    }
+
+    fn apply_change(&mut self, command: Command) -> Outcome {
+        let before = self.editor.undo_len();
+        match command {
+            Command::EnterNote(semitone) => self.enter_note(semitone),
+            Command::EnterDigit(digit) => {
+                let place = self.place();
+                if let Some(next) = self.editor.enter_digit(&mut self.module, place, digit) {
+                    self.take_cursor(next);
+                }
+                self.edited(before)
+            }
+            Command::ClearUnderCursor => {
+                let place = self.place();
+                self.editor.clear_at(&mut self.module, place);
+                self.edited(before)
+            }
+            Command::BackspaceLine => {
+                let place = self.place();
+                if let Some(next) = self.editor.backspace(&mut self.module, place) {
+                    self.row = next.row;
+                    self.field = next.field;
+                    self.nudge_selection();
+                }
+                self.edited(before)
+            }
+            Command::InsertChannelRow => {
+                self.editor.insert_channel_row(
+                    &mut self.module,
+                    self.view_pattern,
+                    self.channel,
+                    self.row,
+                );
+                self.edited(before)
+            }
+            Command::DeleteChannelRow => {
+                self.editor.delete_channel_row(
+                    &mut self.module,
+                    self.view_pattern,
+                    self.channel,
+                    self.row,
+                );
+                self.edited(before)
+            }
+            Command::InsertPatternRow => {
+                self.editor
+                    .insert_pattern_row(&mut self.module, self.view_pattern, self.row);
+                self.edited(before)
+            }
+            Command::DeletePatternRow => {
+                self.editor
+                    .delete_pattern_row(&mut self.module, self.view_pattern, self.row);
+                self.edited(before)
+            }
+            Command::ClearChannel => {
+                self.editor
+                    .clear_channel(&mut self.module, self.view_pattern, self.channel);
+                self.edited(before)
+            }
+            Command::ClearPattern => {
+                self.editor
+                    .clear_pattern(&mut self.module, self.view_pattern);
+                self.selection = None;
+                self.edited(before)
+            }
+            Command::ToggleBlock => {
+                if self.selection.is_some() {
+                    self.selection = None;
+                } else {
+                    self.selection = Some(Selection {
+                        pattern: self.view_pattern,
+                        anchor_row: self.row,
+                        anchor_channel: self.channel,
+                        row: self.row,
+                        channel: self.channel,
+                    });
+                }
+                Outcome::None
+            }
+            Command::SelectAll => {
+                self.selection = Some(Selection {
+                    pattern: self.view_pattern,
+                    anchor_row: 0,
+                    anchor_channel: 0,
+                    row: ROWS - 1,
+                    channel: CHANNELS - 1,
+                });
+                Outcome::None
+            }
+            Command::ClearBlock => {
+                self.selection = None;
+                Outcome::None
+            }
+            Command::Copy => {
+                self.copy_block();
+                Outcome::None
+            }
+            Command::Cut => {
+                let range = self.active_range();
+                self.clipboard = Editor::copy_range(&self.module, self.view_pattern, range);
+                self.editor.cut(&mut self.module, self.view_pattern, range);
+                self.selection = None;
+                self.message = Some(format!("Cut {}x{}", range.rows(), range.channels()));
+                self.edited(before)
+            }
+            Command::Paste => {
+                if self.clipboard.is_empty() {
+                    self.message = Some("Clipboard is empty".to_string());
+                    return Outcome::None;
+                }
+                self.editor.paste(
+                    &mut self.module,
+                    self.view_pattern,
+                    self.row,
+                    self.channel,
+                    &self.clipboard,
+                );
+                self.message = Some("Pasted".to_string());
+                self.edited(before)
+            }
+            Command::Transpose(semitones) => {
+                let range = self.active_range();
+                self.editor
+                    .transpose(&mut self.module, self.view_pattern, range, semitones);
+                self.edited(before)
+            }
+            Command::Undo => {
+                if self.editor.undo(&mut self.module) {
+                    self.clamp_position();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("Nothing to undo".to_string());
+                    Outcome::None
+                }
+            }
+            Command::Redo => {
+                if self.editor.redo(&mut self.module) {
+                    self.clamp_position();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("Nothing to redo".to_string());
+                    Outcome::None
+                }
+            }
+            Command::OrderPattern(delta) => {
+                let pos = self.order_pos;
+                if self.editor.bump_order_pattern(&mut self.module, pos, delta) {
+                    self.sync_view_to_order();
+                    self.edited(before)
+                } else {
+                    self.message = Some("N makes a new pattern".to_string());
+                    Outcome::None
+                }
+            }
+            Command::InsertOrder => {
+                if self.editor.insert_order(&mut self.module, self.order_pos) {
+                    self.sync_view_to_order();
+                    self.edited(before)
+                } else {
+                    self.message = Some("The order list is full".to_string());
+                    Outcome::None
+                }
+            }
+            Command::DeleteOrder => {
+                if self.editor.delete_order(&mut self.module, self.order_pos) {
+                    self.sync_view_to_order();
+                    self.edited(before)
+                } else {
+                    self.message = Some("The song keeps one position".to_string());
+                    Outcome::None
+                }
+            }
+            Command::SongLength(delta) => {
+                let next = i32::from(self.module.song_length) + delta;
+                let next = u8::try_from(next.clamp(1, 128)).unwrap_or(1);
+                if self.editor.set_song_length(&mut self.module, next) {
+                    self.clamp_position();
+                    self.edited(before)
+                } else {
+                    self.message = Some("Song length stays in 1..=128".to_string());
+                    Outcome::None
+                }
+            }
+            Command::NewPattern => {
+                if self.editor.new_pattern(&mut self.module, self.order_pos) {
+                    self.sync_view_to_order();
+                    self.message = Some(format!("Pattern {:02}", self.view_pattern));
+                    Outcome::Edited
+                } else {
+                    self.message = Some("Already at 256 patterns".to_string());
+                    Outcome::None
+                }
+            }
+            Command::BeginTitle => {
+                self.overlay = Overlay::Text {
+                    target: TextTarget::Title,
+                    buffer: editable_text(&self.module.title),
+                };
+                Outcome::None
+            }
+            Command::BeginSampleName => {
+                let index = self.sample.min(SAMPLE_COUNT - 1);
+                self.overlay = Overlay::Text {
+                    target: TextTarget::Sample(index),
+                    buffer: editable_text(&self.module.samples[index].name),
+                };
+                Outcome::None
+            }
+            _ => Outcome::None,
+        }
+    }
+
+    fn enter_note(&mut self, semitone: u8) -> Outcome {
+        let Some(period) = period_at(self.octave, semitone) else {
+            return Outcome::None;
+        };
+        let sample = u8::try_from(self.sample.saturating_add(1)).unwrap_or(1);
+        let channel = self.channel;
+        let place = self.place();
+        let Some(next) = self
+            .editor
+            .enter_note(&mut self.module, place, period, sample)
+        else {
+            return Outcome::None;
+        };
+        self.take_cursor(next);
+        Outcome::Preview {
+            sample,
+            period,
+            channel,
+        }
+    }
+
+    fn confirm_text(&mut self) -> Outcome {
+        let Overlay::Text { target, buffer } = self.overlay.clone() else {
+            return Outcome::None;
+        };
+        let result = match target {
+            TextTarget::Title => self.editor.set_title(&mut self.module, &buffer),
+            TextTarget::Sample(index) => {
+                self.editor
+                    .set_sample_name(&mut self.module, index, &buffer)
+            }
+        };
+        match result {
+            Ok(()) => {
+                self.overlay = Overlay::None;
+                Outcome::Edited
+            }
+            Err(err) => {
+                self.message = Some(err.to_string());
+                Outcome::None
+            }
+        }
+    }
+
+    fn push_text(&mut self, ch: char) {
+        let Overlay::Text { target, buffer } = &mut self.overlay else {
+            return;
+        };
+        let max = match target {
+            TextTarget::Title => TITLE_LEN,
+            TextTarget::Sample(_) => SAMPLE_NAME_LEN,
+        };
+        if buffer.chars().count() >= max || !is_name_char(ch) {
+            return;
+        }
+        buffer.push(ch);
+    }
+
+    fn copy_block(&mut self) {
+        if self.module.patterns.get(self.view_pattern).is_none() {
+            self.message = Some("Pattern is not in the file".to_string());
+            return;
+        }
+        let range = self.active_range();
+        self.clipboard = Editor::copy_range(&self.module, self.view_pattern, range);
+        self.selection = None;
+        self.message = Some(format!("Copied {}x{}", range.rows(), range.channels()));
+    }
+
+    fn active_range(&self) -> CellRange {
+        if let Some(selection) = self.selection {
+            if selection.pattern == self.view_pattern {
+                return selection.range();
+            }
+        }
+        CellRange::single(self.row, self.channel)
+    }
+
+    fn place(&self) -> Place {
+        Place {
+            pattern: self.view_pattern,
+            cursor: PatternCursor {
+                row: self.row,
+                channel: self.channel,
+                field: self.field,
+            },
+            step: self.step,
+        }
+    }
+
+    fn take_cursor(&mut self, cursor: PatternCursor) {
+        self.row = cursor.row;
+        self.channel = cursor.channel;
+        self.field = cursor.field;
+        self.nudge_selection();
+    }
+
+    fn edited(&self, before: usize) -> Outcome {
+        if self.editor.undo_len() != before {
+            Outcome::Edited
+        } else {
+            Outcome::None
+        }
+    }
+
+    fn nudge_selection(&mut self) {
+        if let Some(selection) = &mut self.selection {
+            if selection.pattern == self.view_pattern {
+                selection.row = self.row;
+                selection.channel = self.channel;
+            }
+        }
+    }
+
+    fn retarget_pattern(&mut self, pattern: usize) {
+        if pattern != self.view_pattern {
+            self.selection = None;
+            self.view_pattern = pattern;
+        }
+    }
+
+    fn sync_view_to_order(&mut self) {
+        self.clamp_position();
+        let pattern = usize::from(self.module.order[self.order_pos]);
+        if pattern < self.module.patterns.len() {
+            self.retarget_pattern(pattern);
+        }
+    }
+
+    fn clamp_position(&mut self) {
+        let len = self.song_len();
+        if self.order_pos >= len {
+            self.order_pos = len.saturating_sub(1);
+        }
+        if self.module.patterns.is_empty() {
+            self.view_pattern = 0;
+            return;
+        }
+        if self.view_pattern >= self.module.patterns.len() {
+            self.selection = None;
+            self.view_pattern = self.module.patterns.len() - 1;
+        }
+    }
 }
 
-/// Map a key to a command. Letter keys are case-insensitive.
-pub fn command_for(focus: Focus, key: Key) -> Option<Command> {
-    let key = match key {
-        Key::Char(ch) => Key::Char(ch.to_ascii_lowercase()),
-        other => other,
-    };
+fn is_motion(command: Command) -> bool {
+    matches!(
+        command,
+        Command::MoveRow(_)
+            | Command::MoveChannel(_)
+            | Command::MoveField(_)
+            | Command::FirstRow
+            | Command::LastRow
+            | Command::NextChannel
+            | Command::PrevChannel
+            | Command::MoveOrder(_)
+            | Command::MovePattern(_)
+            | Command::NextFocus
+            | Command::PrevFocus
+            | Command::MoveSample(_)
+            | Command::FirstSample
+            | Command::LastSample
+            | Command::FirstOrder
+            | Command::LastOrder
+    )
+}
+
+/// Map a key to a command.
+pub fn command_for(app: &App, key: Key) -> Option<Command> {
+    match app.overlay {
+        Overlay::Help => return help_key(key),
+        Overlay::Quit => return quit_key(key),
+        Overlay::Text { .. } => return text_key(key),
+        Overlay::None => {}
+    }
+    if matches!(key, Key::Esc) {
+        return Some(esc_command(app));
+    }
+    let key = fold_case(key);
+    if !(app.focus == Focus::Pattern && app.editing) && matches!(key, Key::Char('q')) {
+        return Some(Command::QuitAsk);
+    }
+    if let Some(command) = global_key(key) {
+        return Some(command);
+    }
+    if app.focus == Focus::Pattern {
+        if let Some(command) = pattern_chord(key) {
+            return Some(command);
+        }
+    }
+    if app.focus == Focus::Pattern && app.editing {
+        edit_key(app.field, key)
+    } else {
+        browse_key(app.focus, key)
+    }
+}
+
+fn help_key(key: Key) -> Option<Command> {
     match key {
-        Key::CtrlC | Key::Esc | Key::Char('q') => return Some(Command::Quit),
-        Key::Tab => return Some(Command::NextFocus),
-        Key::BackTab => return Some(Command::PrevFocus),
-        Key::Char('[') => return Some(Command::MoveOrder(-1)),
-        Key::Char(']') => return Some(Command::MoveOrder(1)),
-        Key::Char(',') => return Some(Command::MovePattern(-1)),
-        Key::Char('.') => return Some(Command::MovePattern(1)),
-        Key::Char(' ') => return Some(Command::TogglePlay),
-        Key::Char('1') => return Some(Command::ToggleMute(0)),
-        Key::Char('2') => return Some(Command::ToggleMute(1)),
-        Key::Char('3') => return Some(Command::ToggleMute(2)),
-        Key::Char('4') => return Some(Command::ToggleMute(3)),
-        _ => {}
+        Key::Esc | Key::Enter | Key::Char('?') | Key::Char('q') | Key::Char('Q') => {
+            Some(Command::CloseOverlay)
+        }
+        _ => None,
+    }
+}
+
+fn quit_key(key: Key) -> Option<Command> {
+    match fold_case(key) {
+        Key::Char('y') => Some(Command::SaveAndQuit),
+        Key::Char('n') => Some(Command::QuitDiscard),
+        Key::Esc => Some(Command::CloseOverlay),
+        _ => None,
+    }
+}
+
+fn text_key(key: Key) -> Option<Command> {
+    match key {
+        Key::Enter => Some(Command::TextConfirm),
+        Key::Esc => Some(Command::TextCancel),
+        Key::Backspace => Some(Command::TextBackspace),
+        Key::Char(ch) if !ch.is_control() => Some(Command::TextPush(ch)),
+        _ => None,
+    }
+}
+
+fn esc_command(app: &App) -> Command {
+    if app.selection.is_some() {
+        Command::ClearBlock
+    } else if app.editing {
+        Command::ToggleEdit
+    } else {
+        Command::QuitAsk
+    }
+}
+
+fn global_key(key: Key) -> Option<Command> {
+    match key {
+        Key::Ctrl('s') => Some(Command::Save),
+        Key::Ctrl('z') => Some(Command::Undo),
+        Key::Ctrl('y') => Some(Command::Redo),
+        Key::Ctrl('q') => Some(Command::QuitAsk),
+        Key::Ctrl('t') => Some(Command::BeginTitle),
+        Key::Ctrl('n') => Some(Command::NewPattern),
+        Key::Ctrl('c') => Some(Command::Copy),
+        Key::Ctrl('x') => Some(Command::Cut),
+        Key::Ctrl('v') => Some(Command::Paste),
+        Key::Ctrl('b') => Some(Command::ToggleBlock),
+        Key::Ctrl('a') => Some(Command::SelectAll),
+        Key::Char(' ') => Some(Command::TogglePlay),
+        Key::Enter => Some(Command::ToggleEdit),
+        Key::Char('?') => Some(Command::ShowHelp),
+        Key::F(1) => Some(Command::Octave(-1)),
+        Key::F(2) => Some(Command::Octave(1)),
+        Key::F(3) => Some(Command::Step(-1)),
+        Key::F(4) => Some(Command::Step(1)),
+        Key::Alt('1') => Some(Command::ToggleMute(0)),
+        Key::Alt('2') => Some(Command::ToggleMute(1)),
+        Key::Alt('3') => Some(Command::ToggleMute(2)),
+        Key::Alt('4') => Some(Command::ToggleMute(3)),
+        _ => None,
+    }
+}
+
+fn pattern_chord(key: Key) -> Option<Command> {
+    match key {
+        Key::AltUp => Some(Command::Transpose(1)),
+        Key::AltDown => Some(Command::Transpose(-1)),
+        Key::AltRight => Some(Command::Transpose(12)),
+        Key::AltLeft => Some(Command::Transpose(-12)),
+        Key::Alt('k') => Some(Command::ClearChannel),
+        Key::Alt('p') => Some(Command::ClearPattern),
+        _ => None,
+    }
+}
+
+fn edit_key(field: Field, key: Key) -> Option<Command> {
+    match key {
+        Key::Left => Some(Command::MoveField(-1)),
+        Key::Right => Some(Command::MoveField(1)),
+        Key::Up => Some(Command::MoveRow(-1)),
+        Key::Down => Some(Command::MoveRow(1)),
+        Key::Tab => Some(Command::NextChannel),
+        Key::BackTab => Some(Command::PrevChannel),
+        Key::PageUp => Some(Command::MoveRow(-PATTERN_PAGE)),
+        Key::PageDown => Some(Command::MoveRow(PATTERN_PAGE)),
+        Key::Home => Some(Command::FirstRow),
+        Key::End => Some(Command::LastRow),
+        Key::Char('[') => Some(Command::MoveOrder(-1)),
+        Key::Char(']') => Some(Command::MoveOrder(1)),
+        Key::Char(',') => Some(Command::MovePattern(-1)),
+        Key::Char('.') => Some(Command::MovePattern(1)),
+        Key::Delete => Some(Command::ClearUnderCursor),
+        Key::Backspace => Some(Command::BackspaceLine),
+        Key::Insert => Some(Command::InsertChannelRow),
+        Key::CtrlBackspace => Some(Command::DeleteChannelRow),
+        Key::CtrlInsert => Some(Command::InsertPatternRow),
+        Key::CtrlDelete => Some(Command::DeletePatternRow),
+        Key::Char(ch) => note_or_digit(field, ch),
+        _ => None,
+    }
+}
+
+fn note_or_digit(field: Field, ch: char) -> Option<Command> {
+    match field {
+        Field::Note => semitone_from_key(ch).map(Command::EnterNote),
+        Field::SampleHigh | Field::SampleLow => ch
+            .to_digit(10)
+            .map(|digit| Command::EnterDigit(u8::try_from(digit).unwrap_or(0))),
+        Field::Effect | Field::ParamHigh | Field::ParamLow => ch
+            .to_digit(16)
+            .map(|digit| Command::EnterDigit(u8::try_from(digit).unwrap_or(0))),
+    }
+}
+
+fn browse_key(focus: Focus, key: Key) -> Option<Command> {
+    if let Some(command) = shared_browse(key) {
+        return Some(command);
     }
     match focus {
-        Focus::Pattern => match key {
-            Key::Up | Key::Char('k') => Some(Command::MoveRow(-1)),
-            Key::Down | Key::Char('j') => Some(Command::MoveRow(1)),
-            Key::Left | Key::Char('h') => Some(Command::MoveChannel(-1)),
-            Key::Right | Key::Char('l') => Some(Command::MoveChannel(1)),
-            Key::PageUp => Some(Command::MoveRow(-PATTERN_PAGE)),
-            Key::PageDown => Some(Command::MoveRow(PATTERN_PAGE)),
-            Key::Home => Some(Command::FirstRow),
-            Key::End => Some(Command::LastRow),
-            _ => None,
-        },
-        Focus::Samples => match key {
-            Key::Up | Key::Char('k') => Some(Command::MoveSample(-1)),
-            Key::Down | Key::Char('j') => Some(Command::MoveSample(1)),
-            Key::PageUp => Some(Command::MoveSample(-SAMPLE_PAGE)),
-            Key::PageDown => Some(Command::MoveSample(SAMPLE_PAGE)),
-            Key::Home => Some(Command::FirstSample),
-            Key::End => Some(Command::LastSample),
-            _ => None,
-        },
+        Focus::Pattern => pattern_browse(key),
+        Focus::Samples => sample_browse(key),
+        Focus::Order => order_browse(key),
+    }
+}
+
+fn shared_browse(key: Key) -> Option<Command> {
+    match key {
+        Key::Tab => Some(Command::NextFocus),
+        Key::BackTab => Some(Command::PrevFocus),
+        Key::Char('[') => Some(Command::MoveOrder(-1)),
+        Key::Char(']') => Some(Command::MoveOrder(1)),
+        Key::Char(',') => Some(Command::MovePattern(-1)),
+        Key::Char('.') => Some(Command::MovePattern(1)),
+        Key::Char('1') => Some(Command::ToggleMute(0)),
+        Key::Char('2') => Some(Command::ToggleMute(1)),
+        Key::Char('3') => Some(Command::ToggleMute(2)),
+        Key::Char('4') => Some(Command::ToggleMute(3)),
+        _ => None,
+    }
+}
+
+fn pattern_browse(key: Key) -> Option<Command> {
+    match key {
+        Key::Up | Key::Char('k') => Some(Command::MoveRow(-1)),
+        Key::Down | Key::Char('j') => Some(Command::MoveRow(1)),
+        Key::Left | Key::Char('h') => Some(Command::MoveChannel(-1)),
+        Key::Right | Key::Char('l') => Some(Command::MoveChannel(1)),
+        Key::PageUp => Some(Command::MoveRow(-PATTERN_PAGE)),
+        Key::PageDown => Some(Command::MoveRow(PATTERN_PAGE)),
+        Key::Home => Some(Command::FirstRow),
+        Key::End => Some(Command::LastRow),
+        _ => None,
+    }
+}
+
+fn sample_browse(key: Key) -> Option<Command> {
+    match key {
+        Key::Up | Key::Char('k') => Some(Command::MoveSample(-1)),
+        Key::Down | Key::Char('j') => Some(Command::MoveSample(1)),
+        Key::PageUp => Some(Command::MoveSample(-SAMPLE_PAGE)),
+        Key::PageDown => Some(Command::MoveSample(SAMPLE_PAGE)),
+        Key::Home => Some(Command::FirstSample),
+        Key::End => Some(Command::LastSample),
+        Key::Char('r') => Some(Command::BeginSampleName),
+        _ => None,
+    }
+}
+
+fn order_browse(key: Key) -> Option<Command> {
+    match key {
+        Key::Left | Key::Char('h') => Some(Command::MoveOrder(-1)),
+        Key::Right | Key::Char('l') => Some(Command::MoveOrder(1)),
+        Key::Up | Key::Char('k') => Some(Command::OrderPattern(1)),
+        Key::Down | Key::Char('j') => Some(Command::OrderPattern(-1)),
+        Key::Home => Some(Command::FirstOrder),
+        Key::End => Some(Command::LastOrder),
+        Key::PageUp => Some(Command::MoveOrder(-8)),
+        Key::PageDown => Some(Command::MoveOrder(8)),
+        Key::Insert => Some(Command::InsertOrder),
+        Key::Delete => Some(Command::DeleteOrder),
+        Key::Char('+') | Key::Char('=') => Some(Command::SongLength(1)),
+        Key::Char('-') => Some(Command::SongLength(-1)),
+        Key::Char('n') => Some(Command::NewPattern),
+        _ => None,
+    }
+}
+
+fn fold_case(key: Key) -> Key {
+    match key {
+        Key::Char(ch) => Key::Char(ch.to_ascii_lowercase()),
+        Key::Alt(ch) => Key::Alt(ch.to_ascii_lowercase()),
+        Key::Ctrl(ch) => Key::Ctrl(ch.to_ascii_lowercase()),
+        other => other,
     }
 }
 
@@ -289,7 +1197,7 @@ fn window_start(offset: usize, cursor: usize, len: usize, window: usize) -> usiz
 }
 
 fn cycle(focus: Focus, forward: bool) -> Focus {
-    const PANES: [Focus; 2] = [Focus::Pattern, Focus::Samples];
+    const PANES: [Focus; 3] = [Focus::Pattern, Focus::Samples, Focus::Order];
     let index = PANES.iter().position(|pane| *pane == focus).unwrap_or(0);
     let len = isize::try_from(PANES.len()).unwrap_or(1);
     let delta = if forward { 1 } else { -1 };
@@ -350,36 +1258,34 @@ mod tests {
     #[test]
     fn sample_focus_moves_samples_not_rows() {
         let mut app = app_with_patterns(1);
-        app.apply(command_for(app.focus, Key::Tab).unwrap());
+        app.apply(command_for(&app, Key::Tab).unwrap());
         assert_eq!(app.focus, Focus::Samples);
-        app.apply(command_for(app.focus, Key::Down).unwrap());
-        app.apply(command_for(app.focus, Key::Char('j')).unwrap());
+        app.apply(command_for(&app, Key::Down).unwrap());
+        app.apply(command_for(&app, Key::Char('j')).unwrap());
         assert_eq!(app.sample, 2);
         assert_eq!(app.row, 0);
         app.apply(Command::LastSample);
         assert_eq!(app.sample, 30);
         app.apply(Command::MoveSample(1));
         assert_eq!(app.sample, 30);
-        app.apply(command_for(app.focus, Key::BackTab).unwrap());
+        app.apply(command_for(&app, Key::BackTab).unwrap());
         assert_eq!(app.focus, Focus::Pattern);
+        app.apply(command_for(&app, Key::Tab).unwrap());
+        app.apply(command_for(&app, Key::Tab).unwrap());
+        assert_eq!(app.focus, Focus::Order);
     }
 
     #[test]
-    fn keys_quit_and_ignore_unknown() {
+    fn keys_quit_and_ignore_unknown_until_edit_mode() {
         let app = app_with_patterns(1);
+        assert_eq!(command_for(&app, Key::Char('Q')), Some(Command::QuitAsk));
+        assert_eq!(command_for(&app, Key::Esc), Some(Command::QuitAsk));
+        assert_eq!(command_for(&app, Key::Ctrl('q')), Some(Command::QuitAsk));
+        assert_eq!(command_for(&app, Key::Ctrl('c')), Some(Command::Copy));
+        assert_eq!(command_for(&app, Key::Char('x')), None);
+        assert_eq!(command_for(&app, Key::Char(' ')), Some(Command::TogglePlay));
         assert_eq!(
-            command_for(Focus::Pattern, Key::Char('Q')),
-            Some(Command::Quit)
-        );
-        assert_eq!(command_for(Focus::Samples, Key::Esc), Some(Command::Quit));
-        assert_eq!(command_for(Focus::Pattern, Key::CtrlC), Some(Command::Quit));
-        assert_eq!(command_for(Focus::Pattern, Key::Char('x')), None);
-        assert_eq!(
-            command_for(Focus::Pattern, Key::Char(' ')),
-            Some(Command::TogglePlay)
-        );
-        assert_eq!(
-            command_for(Focus::Samples, Key::Char('3')),
+            command_for(&app, Key::Char('3')),
             Some(Command::ToggleMute(2))
         );
         let mut playing = app;
@@ -390,20 +1296,134 @@ mod tests {
         playing.apply(Command::TogglePlay);
         assert!(!playing.playing);
         assert_eq!(
-            command_for(Focus::Pattern, Key::Char(']')),
+            command_for(&playing, Key::Char(']')),
             Some(Command::MoveOrder(1))
         );
         assert_eq!(
-            command_for(Focus::Samples, Key::Char('.')),
+            command_for(&playing, Key::Char('.')),
             Some(Command::MovePattern(1))
         );
         assert_eq!(
-            command_for(Focus::Pattern, Key::Char('l')),
+            command_for(&playing, Key::Char('l')),
             Some(Command::MoveChannel(1))
         );
-        assert_eq!(command_for(Focus::Samples, Key::Right), None);
-        let mut quitting = playing;
-        quitting.apply(Command::Quit);
-        assert!(quitting.should_quit());
+        playing.apply(Command::NextFocus);
+        assert_eq!(command_for(&playing, Key::Right), None);
+        playing.apply(Command::QuitAsk);
+        assert!(playing.should_quit());
+    }
+
+    #[test]
+    fn edit_mode_enters_notes_digits_and_asks_before_quit() {
+        let mut app = app_with_patterns(1);
+        app.module.samples[0].volume = 64;
+        app.apply(command_for(&app, Key::Enter).unwrap());
+        assert!(app.editing);
+        assert_eq!(app.focus, Focus::Pattern);
+        assert_eq!(app.octave, 2);
+        assert_eq!(app.step, 1);
+
+        let note = command_for(&app, Key::Char('z')).unwrap();
+        assert_eq!(note, Command::EnterNote(0));
+        assert!(matches!(
+            app.apply(note),
+            Outcome::Preview {
+                sample: 1,
+                period: 428,
+                channel: 0
+            }
+        ));
+        assert_eq!(app.module.patterns[0].rows[0][0].period, 428);
+        assert_eq!(app.module.patterns[0].rows[0][0].sample, 1);
+        assert_eq!(app.row, 1);
+        assert!(app.is_dirty());
+
+        app.apply(command_for(&app, Key::Char('q')).unwrap());
+        assert_eq!(app.module.patterns[0].rows[1][0].period, 214);
+        assert_eq!(app.row, 2);
+        assert!(!app.should_quit());
+
+        app.apply(Command::Undo);
+        app.apply(Command::Undo);
+        assert!(!app.is_dirty());
+        assert_eq!(app.module.patterns[0].rows[0][0], Cell::empty());
+
+        app.row = 0;
+        app.apply(Command::MoveField(1));
+        app.apply(Command::EnterDigit(1));
+        app.apply(Command::EnterDigit(2));
+        assert_eq!(app.field, Field::Effect);
+        assert_eq!(app.module.patterns[0].rows[0][0].sample, 12);
+        app.apply(Command::EnterDigit(0x0C));
+        app.apply(Command::EnterDigit(0x04));
+        app.apply(Command::EnterDigit(0x00));
+        assert_eq!(app.module.patterns[0].rows[0][0].effect, 0x0C);
+        assert_eq!(app.module.patterns[0].rows[0][0].param, 0x40);
+        assert_eq!(app.field, Field::Note);
+        assert_eq!(app.row, 1);
+
+        app.apply(Command::QuitAsk);
+        assert!(!app.should_quit());
+        assert!(matches!(app.overlay, Overlay::Quit));
+        app.apply(command_for(&app, Key::Esc).unwrap());
+        assert!(matches!(app.overlay, Overlay::None));
+        app.apply(Command::QuitAsk);
+        app.apply(command_for(&app, Key::Char('n')).unwrap());
+        assert!(app.should_quit());
+    }
+
+    #[test]
+    fn block_copy_paste_and_order_edits_mark_the_song_dirty() {
+        let mut app = app_with_patterns(1);
+        app.apply(Command::ToggleEdit);
+        app.apply(Command::EnterNote(0));
+        app.row = 0;
+        app.apply(command_for(&app, Key::Ctrl('b')).unwrap());
+        app.apply(Command::MoveRow(1));
+        app.apply(Command::MoveChannel(1));
+        assert!(app.cell_selected(0, 0));
+        assert!(app.cell_selected(1, 1));
+        app.apply(Command::Copy);
+        assert!(app.selection.is_none());
+        app.row = 4;
+        app.channel = 2;
+        assert!(matches!(app.apply(Command::Paste), Outcome::Edited));
+        assert_eq!(app.module.patterns[0].rows[4][2].period, 428);
+        assert_eq!(app.message.as_deref(), Some("Pasted"));
+
+        app.apply(Command::Transpose(1));
+        assert_eq!(app.module.patterns[0].rows[4][2].period, 404);
+
+        app.focus = Focus::Order;
+        app.editing = false;
+        app.apply(command_for(&app, Key::Char('n')).unwrap());
+        assert_eq!(app.module.patterns.len(), 2);
+        assert_eq!(app.view_pattern, 1);
+        app.apply(command_for(&app, Key::Char('+')).unwrap());
+        assert_eq!(app.module.song_length, 2);
+        app.apply(Command::Undo);
+        assert_eq!(app.module.song_length, 1);
+    }
+
+    #[test]
+    fn save_round_trips_and_clears_the_modified_flag() {
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("omatrack-app-save-{}.mod", std::process::id()));
+        let mut app = App::open(Module::new(Tag::Mk), path.clone());
+        app.apply(Command::ToggleEdit);
+        app.apply(Command::EnterNote(0));
+        app.apply(Command::BeginTitle);
+        for ch in "Edit".chars() {
+            app.apply(Command::TextPush(ch));
+        }
+        assert!(matches!(app.apply(Command::TextConfirm), Outcome::Edited));
+        assert_eq!(app.module.display_title(), "Edit");
+        app.save().unwrap();
+        assert!(!app.is_dirty());
+        let loaded = Module::load(&path).unwrap();
+        assert_eq!(loaded.display_title(), "Edit");
+        assert_eq!(loaded.patterns[0].rows[0][0].period, 428);
+        assert_eq!(loaded.patterns[0].rows[0][0].sample, 1);
+        let _ = std::fs::remove_file(path);
     }
 }

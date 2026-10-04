@@ -5,15 +5,39 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Paragraph};
 use ratatui::Frame;
 
-use crate::module::{Sample, CHANNELS};
+use crate::edit::Field;
+use crate::module::{Cell, Sample, CHANNELS, SAMPLE_NAME_LEN, TITLE_LEN};
 use crate::notes::{effect_description, format_finetune, format_period};
 
-use super::app::{App, Focus};
+use super::app::{App, Focus, Overlay, TextTarget};
 use super::theme::{paint, Theme};
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "space play  1-4 mute  q quit  tab view  hjkl  [ ] order  , . pattern";
+const HELP: &str = "Enter edit  ? help  Ctrl-S save  space play  q quit";
+
+const HELP_LINES: &[&str] = &[
+    "Omatrack keys                                          ? or Esc closes",
+    "Enter edit/browse   Space play/stop   Ctrl-S save   Ctrl-Z undo  Ctrl-Y redo",
+    "Ctrl-Q or q quits from browse. Esc closes a block, leaves edit, then quits.",
+    "Arrows move. Tab changes pane; in edit, Tab changes channel.",
+    "F1 F2 octave 1-3    F3 F4 step 0-16    Alt-1..4 mute    1-4 mute in browse",
+    "",
+    "Edit mode. Lower row is the octave, upper row is one octave higher.",
+    "  Z S X D C V G B H N J M    C C# D D# E F F# G G# A A# B",
+    "  Q 2 W 3 E R 5 T 6 Y 7 U    same notes, one octave higher",
+    "Delete clears the cell, or one digit. Backspace clears one step up.",
+    "Insert inserts a channel row. Ctrl-Backspace deletes that channel row.",
+    "Ctrl-Insert / Ctrl-Delete insert or delete a row on every channel.",
+    "Sample digits are decimal 00-31. Effect and parameter digits are hex.",
+    "A note writes the current sample and moves down by the edit step.",
+    "",
+    "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
+    "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
+    "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
+    "Ctrl-T edits the title. On Samples, R renames the instrument.",
+    "A * after the title means unsaved. Quit asks before discarding it.",
+];
 
 /// Draw the viewer into `frame`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -25,6 +49,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_too_small(frame, area, theme);
         return;
     };
+    if matches!(app.overlay, Overlay::Help) {
+        draw_help(frame, area, theme);
+        return;
+    }
 
     let row_window = usize::from(regions.pattern.height.saturating_sub(2)).saturating_sub(2);
     let sample_window = usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1);
@@ -51,6 +79,56 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(clip(HELP.to_string(), regions.help.width)).style(theme.dim()),
         regions.help,
     );
+    match &app.overlay {
+        Overlay::Quit => {
+            let bar = Rect {
+                x: regions.status.x,
+                y: regions.status.y,
+                width: regions.status.width,
+                height: regions.status.height.saturating_add(regions.help.height),
+            };
+            frame.render_widget(
+                Paragraph::new("Unsaved changes.  y save and quit    n discard    Esc cancel")
+                    .style(paint(theme.cursor_fg, theme.cursor_bg, true)),
+                bar,
+            );
+        }
+        Overlay::Text { target, buffer } => {
+            frame.render_widget(
+                Paragraph::new(clip(text_prompt(target, buffer), regions.status.width))
+                    .style(theme.title()),
+                regions.status,
+            );
+        }
+        Overlay::None | Overlay::Help => {}
+    }
+}
+
+fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
+    let lines: Vec<Line<'static>> = HELP_LINES
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            let style = if index == 0 {
+                theme.title()
+            } else {
+                theme.text()
+            };
+            styled((*line).to_string(), style)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines).style(theme.fill()), area);
+}
+
+fn text_prompt(target: &TextTarget, buffer: &str) -> String {
+    let (label, max) = match target {
+        TextTarget::Title => ("Title".to_string(), TITLE_LEN),
+        TextTarget::Sample(index) => (format!("Sample {:02}", index + 1), SAMPLE_NAME_LEN),
+    };
+    format!(
+        "{label} {}/{max}: {buffer}_   Enter saves, Esc cancels",
+        buffer.chars().count()
+    )
 }
 
 struct Regions {
@@ -133,10 +211,11 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let mut lines = Vec::new();
     if inner_h > 0 {
         let title = app.module.display_title();
+        let dirty = if app.is_dirty() { " *" } else { "" };
         let (text, style) = if title.is_empty() {
-            ("(untitled)".to_string(), theme.dim())
+            (format!("(untitled){dirty}"), theme.dim())
         } else {
-            (title, theme.title())
+            (format!("{title}{dirty}"), theme.title())
         };
         lines.push(styled(text, style));
     }
@@ -161,7 +240,8 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
 
 fn draw_pattern(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let focused = app.focus == Focus::Pattern;
-    let block = pane("Pattern", focused, theme);
+    let title = if app.editing { "EDIT" } else { "Pattern" };
+    let block = pane(title, focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
     let row_window = inner_h.saturating_sub(2);
@@ -249,14 +329,24 @@ fn pattern_info(app: &App) -> String {
     } else {
         String::new()
     };
-    format!(
+    let header = format!(
         "Pat {}{note}  Pos {} of {}  Row {:02}  Channel {}",
         fmt_num(app.view_pattern),
         app.order_pos,
         app.song_len(),
         app.row,
         app.channel + 1,
-    )
+    );
+    if app.editing {
+        format!(
+            "{header}  {}  Oct {}  Step {}",
+            app.field.label(),
+            app.octave,
+            app.step
+        )
+    } else {
+        header
+    }
 }
 
 fn fmt_num(value: usize) -> String {
@@ -286,7 +376,7 @@ fn pattern_row(
     inner_w: usize,
 ) -> Line<'static> {
     let on_row = row == app.row;
-    let row_bg = if on_row && app.playing {
+    let line_bg = if on_row && app.playing {
         theme.play_bg
     } else if on_row {
         theme.row_bg
@@ -295,62 +385,92 @@ fn pattern_row(
     };
     let mut spans = vec![Span::styled(
         format!("{row:02} "),
-        paint(theme.accent, row_bg, false),
+        paint(theme.accent, line_bg, false),
     )];
     let mut width = 3usize;
     for channel in 0..CHANNELS {
         if channel > 0 {
-            spans.push(Span::styled(" | ", paint(theme.dim, row_bg, false)));
+            spans.push(Span::styled(" | ", paint(theme.dim, line_bg, false)));
             width += 3;
         }
         let cell = pattern.rows[row][channel];
-        let cursor = on_row && channel == app.channel && app.focus == Focus::Pattern;
-        let bg = if cursor { theme.cursor_bg } else { row_bg };
-        let note_fg = if cursor {
-            theme.cursor_fg
-        } else if cell.period == 0 {
-            theme.dim
-        } else {
-            theme.note
-        };
-        let sample_fg = if cursor {
-            theme.cursor_fg
-        } else if cell.sample == 0 {
-            theme.dim
-        } else {
-            theme.text
-        };
-        let effect_fg = if cursor {
-            theme.cursor_fg
-        } else if cell.effect == 0 && cell.param == 0 {
-            theme.dim
-        } else {
-            theme.effect
-        };
-        spans.push(Span::styled(
-            format_period(cell.period),
-            paint(note_fg, bg, cursor),
-        ));
-        spans.push(Span::styled(" ", paint(sample_fg, bg, false)));
-        spans.push(Span::styled(
-            sample_field(cell.sample),
-            paint(sample_fg, bg, cursor),
-        ));
-        spans.push(Span::styled(" ", paint(effect_fg, bg, false)));
-        spans.push(Span::styled(
-            effect_field(cell.effect, cell.param),
-            paint(effect_fg, bg, cursor),
-        ));
+        let selected = app.cell_selected(row, channel);
+        let cell_bg = if selected { theme.block_bg } else { line_bg };
+        let active = on_row && channel == app.channel && app.focus == Focus::Pattern;
+        push_cell(&mut spans, cell, app, theme, active, cell_bg);
         width += 10;
     }
     let pad = inner_w.saturating_sub(width);
     if on_row && pad > 0 {
         spans.push(Span::styled(
             " ".repeat(pad),
-            paint(theme.text, row_bg, false),
+            paint(theme.text, line_bg, false),
         ));
     }
     Line::from(spans)
+}
+
+fn push_cell(
+    spans: &mut Vec<Span<'static>>,
+    cell: Cell,
+    app: &App,
+    theme: Theme,
+    active: bool,
+    bg: ratatui::style::Color,
+) {
+    let glyphs = field_glyphs(cell);
+    let pieces: [(Option<Field>, &str); 8] = [
+        (Some(Field::Note), glyphs[0].as_str()),
+        (None, " "),
+        (Some(Field::SampleHigh), glyphs[1].as_str()),
+        (Some(Field::SampleLow), glyphs[2].as_str()),
+        (None, " "),
+        (Some(Field::Effect), glyphs[3].as_str()),
+        (Some(Field::ParamHigh), glyphs[4].as_str()),
+        (Some(Field::ParamLow), glyphs[5].as_str()),
+    ];
+    for (field, text) in pieces {
+        let hot = if app.editing {
+            active && field == Some(app.field)
+        } else {
+            active
+        };
+        let (fg, paint_bg, bold) = if hot {
+            if app.editing {
+                (theme.edit_fg, theme.edit_bg, true)
+            } else {
+                (theme.cursor_fg, theme.cursor_bg, true)
+            }
+        } else {
+            (glyph_color(field, cell, theme), bg, false)
+        };
+        spans.push(Span::styled(text.to_string(), paint(fg, paint_bg, bold)));
+    }
+}
+
+fn field_glyphs(cell: Cell) -> [String; 6] {
+    let sample: Vec<char> = sample_field(cell.sample).chars().collect();
+    let effect: Vec<char> = effect_field(cell.effect, cell.param).chars().collect();
+    [
+        format_period(cell.period),
+        sample.first().copied().unwrap_or(' ').to_string(),
+        sample.get(1).copied().unwrap_or(' ').to_string(),
+        effect.first().copied().unwrap_or(' ').to_string(),
+        effect.get(1).copied().unwrap_or(' ').to_string(),
+        effect.get(2).copied().unwrap_or(' ').to_string(),
+    ]
+}
+
+fn glyph_color(field: Option<Field>, cell: Cell, theme: Theme) -> ratatui::style::Color {
+    match field {
+        Some(Field::Note) if cell.period == 0 => theme.dim,
+        Some(Field::Note) => theme.note,
+        Some(Field::SampleHigh | Field::SampleLow) if cell.sample == 0 => theme.dim,
+        Some(Field::SampleHigh | Field::SampleLow) => theme.text,
+        Some(_) if cell.effect == 0 && cell.param == 0 => theme.dim,
+        Some(_) => theme.effect,
+        None => theme.dim,
+    }
 }
 
 fn sample_field(sample: u8) -> String {
@@ -411,6 +531,8 @@ fn transport_text(app: &App) -> String {
         return error.clone();
     }
     let state = if app.playing { "Play" } else { "Stop" };
+    let mode = if app.editing { "EDIT" } else { "VIEW" };
+    let dirty = if app.is_dirty() { "*" } else { "" };
     let mut channels = String::new();
     for (index, muted) in app.muted.iter().enumerate() {
         if index > 0 {
@@ -420,7 +542,7 @@ fn transport_text(app: &App) -> String {
         channels.push_str(&format!("{}:{mark}", index + 1));
     }
     format!(
-        "{state}  Ord {:02}/{:02}  Row {:02}  Spd {:02}  Tmp {:03}  {channels}",
+        "{mode}{dirty} {state}  Ord {:02}/{:02}  Row {:02}  Spd {:02}  Tmp {:03}  {channels}",
         app.order_pos,
         app.song_len(),
         app.row,
@@ -430,6 +552,11 @@ fn transport_text(app: &App) -> String {
 }
 
 fn status_text(app: &App) -> String {
+    if let Some(message) = &app.message {
+        if !message.is_empty() {
+            return message.clone();
+        }
+    }
     let Some(cell) = app.current_cell() else {
         return "Pattern is not in the file.".to_string();
     };
@@ -540,8 +667,9 @@ fn clip(text: String, width: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::edit::Field;
     use crate::module::{Cell, Module, Sample, Tag};
-    use crate::tui::app::{command_for, App, Command, Key};
+    use crate::tui::app::{command_for, App, Command, Key, Overlay};
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
     use ratatui::Terminal;
@@ -670,30 +798,30 @@ mod tests {
     #[test]
     fn keys_move_the_cursor_across_the_pattern_and_samples() {
         let mut app = demo();
-        let down = command_for(app.focus, Key::Down).unwrap();
+        let down = command_for(&app, Key::Down).unwrap();
         app.apply(down);
         let screen = text_of(&render(&mut app, 100, 40));
         assert_has(&screen, "Row 01");
         assert!(!screen.contains("Row 00"), "{screen}");
 
-        app.apply(command_for(app.focus, Key::Right).unwrap());
+        app.apply(command_for(&app, Key::Right).unwrap());
         let screen = text_of(&render(&mut app, 100, 40));
         assert_has(&screen, "Channel 2");
         assert!(!screen.contains("Channel 1"), "{screen}");
 
-        app.apply(command_for(app.focus, Key::Char('.')).unwrap());
+        app.apply(command_for(&app, Key::Char('.')).unwrap());
         let screen = text_of(&render(&mut app, 100, 40));
         assert_has(&screen, "Pat 01 (order has pat 00)");
         assert_has(&screen, "Pos 0 of 2");
         assert_has(&screen, "C-2");
 
-        app.apply(command_for(app.focus, Key::Char(']')).unwrap());
+        app.apply(command_for(&app, Key::Char(']')).unwrap());
         let screen = text_of(&render(&mut app, 100, 40));
         assert_has(&screen, "Pos 1 of 2");
         assert!(!screen.contains("order has pat"), "{screen}");
 
         app.apply(Command::FirstRow);
-        app.apply(command_for(app.focus, Key::Tab).unwrap());
+        app.apply(command_for(&app, Key::Tab).unwrap());
         let buf = render(&mut app, 100, 40);
         let screen = text_of(&buf);
         assert_has(&screen, "* Samples");
@@ -701,7 +829,7 @@ mod tests {
         let (x, y) = find_sequence(&buf, &["k", "i", "c", "k"]).expect("kick");
         assert_eq!(buf[(x, y)].bg, Color::Yellow);
 
-        app.apply(command_for(app.focus, Key::Down).unwrap());
+        app.apply(command_for(&app, Key::Down).unwrap());
         let buf = render(&mut app, 100, 40);
         let (x, y) = find_sequence(&buf, &["s", "n", "a", "r", "e"]).expect("snare");
         assert_eq!(buf[(x, y)].bg, Color::Yellow);
@@ -735,5 +863,42 @@ mod tests {
         assert_eq!(header.find("Name"), row.find("kick"));
         assert!(row.contains("-8"), "{row}");
         assert!(row.contains("    2"), "{row}");
+    }
+
+    #[test]
+    fn edit_mode_highlights_one_field_and_help_lists_the_chords() {
+        let mut app = demo();
+        app.editing = true;
+        app.field = Field::Note;
+        let buf = render(&mut app, 100, 40);
+        let screen = text_of(&buf);
+        assert_has(&screen, "* EDIT");
+        assert_has(&screen, "EDIT");
+        assert_has(&screen, "Oct 2");
+        assert_has(&screen, "Step 1");
+        let (x, y) = find_sequence(&buf, &["C", "-", "1"]).expect("note");
+        assert_eq!(buf[(x, y)].bg, Color::White);
+        assert_eq!(buf[(x + 7, y)].symbol(), "C");
+        assert_ne!(buf[(x + 7, y)].bg, Color::White);
+
+        app.field = Field::Effect;
+        let buf = render(&mut app, 100, 40);
+        let (x, y) = find_sequence(&buf, &["C", "-", "1"]).expect("note");
+        assert_ne!(buf[(x, y)].bg, Color::White);
+        assert_eq!(buf[(x + 7, y)].bg, Color::White);
+
+        app.editing = false;
+        app.overlay = Overlay::Help;
+        let screen = text_of(&render(&mut app, 80, 24));
+        assert_has(&screen, "Ctrl-S save");
+        assert_has(&screen, "Ctrl-Z undo");
+        assert_has(&screen, "Z S X D C V G B H N J M");
+        assert_has(&screen, "unsaved");
+
+        let mut app = demo();
+        app.apply(Command::EnterNote(0));
+        let screen = text_of(&render(&mut app, 80, 24));
+        assert_has(&screen, "Demo Tune *");
+        assert_has(&screen, "VIEW*");
     }
 }

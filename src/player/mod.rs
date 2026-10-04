@@ -849,6 +849,54 @@ fn restart_order(module: &Module, len: usize) -> usize {
     }
 }
 
+/// One note on a scratch module, using `module`'s sample data.
+///
+/// The pattern is a single cell. Playback renders it with the same mixer as a
+/// song, which is what edit-mode preview hears.
+pub fn preview_module(module: &Module, sample: u8, period: u16, channel: usize) -> Module {
+    let mut scratch = Module::new(module.tag);
+    if (1..=31).contains(&sample) {
+        let index = usize::from(sample) - 1;
+        scratch.samples[index] = module.samples[index].clone();
+    }
+    if period > 0 && (1..=31).contains(&sample) {
+        let channel = channel.min(CHANNELS - 1);
+        scratch.patterns[0].rows[0][channel] = Cell {
+            sample,
+            period,
+            effect: 0,
+            param: 0,
+        };
+    }
+    scratch
+}
+
+/// Render `frames` of [`preview_module`] at `sample_rate`.
+///
+/// An empty instrument, a zero period, or a zero frame count is silence.
+pub fn render_preview(
+    module: &Module,
+    sample: u8,
+    period: u16,
+    channel: usize,
+    sample_rate: u32,
+    frames: usize,
+) -> Vec<i16> {
+    let mut out = vec![0i16; frames.saturating_mul(2)];
+    if frames == 0 {
+        return out;
+    }
+    let scratch = preview_module(module, sample, period, channel);
+    let config = PlayerConfig {
+        sample_rate: sample_rate.max(1),
+        ..PlayerConfig::default()
+    };
+    let mut playback = Playback::new(config);
+    playback.start(&scratch, 0, 0);
+    playback.render(&scratch, &mut out);
+    out
+}
+
 /// Play `module` from the top into a 16-bit stereo WAV file.
 ///
 /// Rendering stops when the song loops, when `F00` halts it, or after
