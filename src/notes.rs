@@ -16,6 +16,27 @@ const NOTE_NAMES: [&str; 12] = [
     "C-", "C#", "D-", "D#", "E-", "F-", "F#", "G-", "G#", "A-", "A#", "B-",
 ];
 
+/// Index of C-2 in [`PERIODS`] (period 428 at finetune 0).
+pub const C2_NOTE: usize = 12;
+
+/// Period at `index` in [`PERIODS`], clamped to C-1..=B-3.
+pub fn period_at(index: usize) -> u16 {
+    PERIODS[index.min(PERIODS.len() - 1)]
+}
+
+/// Move `index` by `delta` semitones, staying inside C-1..=B-3.
+pub fn step_note(index: usize, delta: isize) -> usize {
+    let current = isize::try_from(index.min(PERIODS.len() - 1)).unwrap_or(0);
+    let next = current.saturating_add(delta);
+    if next <= 0 {
+        0
+    } else {
+        usize::try_from(next)
+            .unwrap_or(PERIODS.len() - 1)
+            .min(PERIODS.len() - 1)
+    }
+}
+
 /// Render a period as a 3-character tracker cell.
 ///
 /// Known finetune-0 periods become `C-1` style names (ProTracker octave

@@ -262,6 +262,19 @@ Keys:
     Home/End             first or last row, or sample
     [ ]                  previous / next order position
     , .                  previous / next pattern
+
+Sample list (R still renames; w reverses, so the keys do not clash):
+    i / o                import a WAV / export this sample
+    Ctrl-G               render the song to a WAV
+    v / f                volume / finetune
+    l / /                loop points / toggle loop
+    t                    trim to a byte range
+    n / w                normalize / reverse
+    a / z                fade in / fade out
+    c                    clear the sample data
+    y                    copy this sample to another slot
+    p                    preview at the note from - and =
+    u                    undo (same stack as Ctrl-Z)
 "
     .to_string()
 }

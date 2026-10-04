@@ -6,6 +6,7 @@
 
 mod app;
 mod render;
+mod sample;
 mod theme;
 
 pub use app::{command_for, App, Command, Focus, Key, Outcome};
@@ -115,6 +116,11 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
         Outcome::SaveAndQuit => {
             if persist(app) {
                 app.quit_now();
+            }
+        }
+        Outcome::Audition { slot, period } => {
+            if let Err(err) = audio.audition(&app.module, slot, period) {
+                app.fail_audio(err.to_string());
             }
         }
         Outcome::None => {}

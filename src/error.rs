@@ -87,6 +87,10 @@ pub enum Error {
     Terminal(io::Error),
     /// Playback could not start, or a render could not be stored.
     Audio(String),
+    /// A WAV file is not a RIFF/WAVE, is truncated, or uses an encoding we do not convert.
+    Wav(String),
+    /// A sample edit was rejected (range, volume, finetune, loop, or slot).
+    SampleEdit(String),
 }
 
 impl Error {
@@ -157,7 +161,9 @@ impl fmt::Display for Error {
                 write!(f, "failed to {verb} {}: {source}", path.display())
             }
             Self::Terminal(source) => write!(f, "terminal error: {source}"),
-            Self::Audio(message) => write!(f, "{message}"),
+            Self::Audio(message) | Self::Wav(message) | Self::SampleEdit(message) => {
+                write!(f, "{message}")
+            }
         }
     }
 }

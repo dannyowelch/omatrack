@@ -199,6 +199,74 @@ pub enum Command {
     TextConfirm,
     /// Drop the text prompt.
     TextCancel,
+    /// Open the WAV import picker for the current sample.
+    BeginImport,
+    /// Open the sample WAV export picker.
+    BeginExportSample,
+    /// Open the song-render picker. Same mix as `--render`.
+    BeginExportSong,
+    /// Append a character to the path prompt.
+    PathPush(char),
+    /// Delete the last path character.
+    PathBackspace,
+    /// Clear the path, or the export rate when that field is focused.
+    PathClear,
+    /// Move the file-list highlight.
+    PathMove(isize),
+    /// Switch between the path and the export rate.
+    PathFocusRate,
+    /// Open a directory, or accept the path.
+    PathConfirm,
+    /// Ask for a new volume.
+    BeginVolume,
+    /// Ask for a new finetune.
+    BeginFinetune,
+    /// Ask for loop start and length, in bytes.
+    BeginLoop,
+    /// Ask for a trim range.
+    BeginTrim,
+    /// Ask which slot to copy the current sample onto.
+    BeginCopySample,
+    /// Append a character to a sample field prompt.
+    FieldPush(char),
+    /// Delete the last field character.
+    FieldBackspace,
+    /// Clear the field prompt.
+    FieldClear,
+    /// Apply the field prompt.
+    FieldConfirm,
+    /// Loop the whole sample, or turn the loop off.
+    ToggleSampleLoop,
+    /// Peak-normalize the current sample.
+    NormalizeSample,
+    /// Reverse the current sample. `R` still renames it.
+    ReverseSample,
+    /// Fade the current sample in from silence.
+    FadeIn,
+    /// Fade the current sample out to silence.
+    FadeOut,
+    /// Drop the PCM and the loop. The name stays.
+    ClearSampleData,
+    /// Play the current sample at the preview note.
+    AuditionSample,
+    /// Move the preview note by semitones.
+    PreviewNote(i8),
+    /// Move the import base note.
+    ImportNudgeNote(i8),
+    /// Move the import finetune.
+    ImportNudgeFine(i8),
+    /// Toggle peak normalize on the import dialog.
+    ImportToggleNormalize,
+    /// Toggle dither on the import dialog.
+    ImportToggleDither,
+    /// Start typing a custom import rate.
+    ImportRateArm,
+    /// Type one digit of a custom import rate.
+    ImportRateDigit(char),
+    /// Delete one digit of a custom import rate.
+    ImportRateBackspace,
+    /// Convert the chosen WAV into the current sample.
+    ImportConfirm,
 }
 
 /// What the audio side should do after [`App::apply`].
@@ -225,6 +293,13 @@ pub enum Outcome {
     Save,
     /// Write the module, then quit if the write worked.
     SaveAndQuit,
+    /// Audition the selected sample through the mixer.
+    Audition {
+        /// Zero-based sample slot.
+        slot: usize,
+        /// Finetune-0 period.
+        period: u16,
+    },
 }
 
 /// What is covering the tracker.
@@ -243,6 +318,12 @@ pub(crate) enum Overlay {
         /// Characters typed so far.
         buffer: String,
     },
+    /// A directory listing and a path.
+    Path(super::sample::PathPrompt),
+    /// How to resample a WAV that was just chosen.
+    Import(super::sample::ImportPrompt),
+    /// Volume, finetune, loop, trim, or a copy destination.
+    Field(super::sample::FieldPrompt),
 }
 
 /// Title or one sample name.
@@ -285,10 +366,14 @@ pub struct App {
     /// Last failure from opening the audio device, shown in the transport bar.
     pub(crate) audio_error: Option<String>,
     pub(crate) message: Option<String>,
+    /// A conversion warning that stays up after the next key clears [`Self::message`].
+    pub(crate) notice: Option<String>,
+    /// Finetune-0 note index used by sample audition. C-2 until `-` or `=` moves it.
+    pub(crate) preview_note: usize,
     pub(crate) overlay: Overlay,
     pub(crate) selection: Option<Selection>,
     clipboard: Clipboard,
-    editor: Editor,
+    pub(crate) editor: Editor,
     quit: bool,
 }
 
@@ -322,6 +407,8 @@ impl App {
             muted: [false; CHANNELS],
             audio_error: None,
             message: None,
+            notice: None,
+            preview_note: crate::notes::C2_NOTE,
             overlay: Overlay::None,
             selection: None,
             clipboard: Clipboard::default(),
@@ -458,7 +545,10 @@ impl App {
                 self.apply_motion(other);
                 Outcome::None
             }
-            other => self.apply_change(other),
+            other => match self.apply_sample(other) {
+                Ok(outcome) => outcome,
+                Err(command) => self.apply_change(command),
+            },
         }
     }
 
@@ -946,6 +1036,9 @@ pub fn command_for(app: &App, key: Key) -> Option<Command> {
         Overlay::Help => return help_key(key),
         Overlay::Quit => return quit_key(key),
         Overlay::Text { .. } => return text_key(key),
+        Overlay::Path(_) => return super::sample::path_command(key),
+        Overlay::Import(_) => return super::sample::import_command(key),
+        Overlay::Field(_) => return super::sample::field_command(key),
         Overlay::None => {}
     }
     if matches!(key, Key::Esc) {
@@ -1011,6 +1104,7 @@ fn esc_command(app: &App) -> Command {
 fn global_key(key: Key) -> Option<Command> {
     match key {
         Key::Ctrl('s') => Some(Command::Save),
+        Key::Ctrl('g') => Some(Command::BeginExportSong),
         Key::Ctrl('z') => Some(Command::Undo),
         Key::Ctrl('y') => Some(Command::Redo),
         Key::Ctrl('q') => Some(Command::QuitAsk),
@@ -1137,6 +1231,23 @@ fn sample_browse(key: Key) -> Option<Command> {
         Key::Home => Some(Command::FirstSample),
         Key::End => Some(Command::LastSample),
         Key::Char('r') => Some(Command::BeginSampleName),
+        Key::Char('i') => Some(Command::BeginImport),
+        Key::Char('o') => Some(Command::BeginExportSample),
+        Key::Char('v') => Some(Command::BeginVolume),
+        Key::Char('f') => Some(Command::BeginFinetune),
+        Key::Char('l') => Some(Command::BeginLoop),
+        Key::Char('/') => Some(Command::ToggleSampleLoop),
+        Key::Char('t') => Some(Command::BeginTrim),
+        Key::Char('n') => Some(Command::NormalizeSample),
+        Key::Char('w') => Some(Command::ReverseSample),
+        Key::Char('a') => Some(Command::FadeIn),
+        Key::Char('z') => Some(Command::FadeOut),
+        Key::Char('c') => Some(Command::ClearSampleData),
+        Key::Char('y') => Some(Command::BeginCopySample),
+        Key::Char('p') => Some(Command::AuditionSample),
+        Key::Char('u') => Some(Command::Undo),
+        Key::Char('-') | Key::Char('_') => Some(Command::PreviewNote(-1)),
+        Key::Char('=') | Key::Char('+') => Some(Command::PreviewNote(1)),
         _ => None,
     }
 }

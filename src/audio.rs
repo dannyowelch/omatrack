@@ -93,6 +93,15 @@ impl AudioOutput {
             playback.set_mute(channel, mute);
         }
         playback.start(&module, order, row);
+        self.play_opened(opened, module, playback)
+    }
+
+    fn play_opened(
+        &mut self,
+        opened: OpenedDevice,
+        module: Module,
+        playback: Playback,
+    ) -> Result<(), Error> {
         {
             let mut shared = lock_shared(&self.shared);
             shared.module = module;
@@ -173,6 +182,65 @@ impl AudioOutput {
         let mut playback = Playback::new(config);
         playback.start(&scratch, 0, 0);
         let frames = (rate / 5).max(1);
+        let mut shared = lock_shared(&self.shared);
+        shared.module = scratch;
+        shared.playback = playback;
+        shared.song = false;
+        shared.active = true;
+        shared.preview_left = Some(frames);
+        Ok(())
+    }
+
+    /// Audition instrument `slot` (0-based) at `period` through the same mixer as [`Self::preview`].
+    ///
+    /// The note is centered, and a sample whose volume is 0 is heard at 64. Playback
+    /// holds for about four seconds, which covers a one-shot and a few loops, then
+    /// the stream closes. Ignored while the song is playing.
+    pub fn audition(&mut self, module: &Module, slot: usize, period: u16) -> Result<(), Error> {
+        let Some(sample_no) = u8::try_from(slot.saturating_add(1))
+            .ok()
+            .filter(|n| *n <= 31)
+        else {
+            return Ok(());
+        };
+        {
+            let shared = lock_shared(&self.shared);
+            if shared.song && shared.active {
+                return Ok(());
+            }
+        }
+        let mut scratch = crate::player::preview_module(module, sample_no, period, 0);
+        if let Some(sample) = scratch.samples.get_mut(slot) {
+            if sample.volume == 0 && !sample.data.is_empty() {
+                sample.volume = 64;
+            }
+        }
+        if self.stream.is_none() {
+            let opened = open_device()?;
+            self.rate = Some(opened.config.sample_rate);
+            let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
+            stream.play().map_err(|err| {
+                self.deactivate();
+                self.rate = None;
+                Error::Audio(format!(
+                    "could not start preview on \"{}\": {err}",
+                    opened.name
+                ))
+            })?;
+            self.stream = Some(stream);
+        }
+        let rate = self
+            .rate
+            .unwrap_or(crate::player::DEFAULT_SAMPLE_RATE)
+            .max(1);
+        let config = PlayerConfig {
+            sample_rate: rate,
+            stereo_separation: 0,
+            ..PlayerConfig::default()
+        };
+        let mut playback = Playback::new(config);
+        playback.start(&scratch, 0, 0);
+        let frames = rate.saturating_mul(4).max(1);
         let mut shared = lock_shared(&self.shared);
         shared.module = scratch;
         shared.playback = playback;
