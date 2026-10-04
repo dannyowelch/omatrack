@@ -21,14 +21,14 @@ Rust 1.83 or newer is required. The committed `Cargo.lock` pins a few transitive
 ```bash
 cargo install --locked --path .
 # or, once a release tag exists:
-cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.2.5
+cargo install --locked --git https://github.com/dannyowelch/omatrack --tag v0.2.6
 ```
 
 A tagged release also attaches `omatrack-x86_64-unknown-linux-gnu` to the GitHub release. Put that binary on `PATH`.
 
 ### Omarchy / Arch
 
-The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.2.5`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` in the recipe is the checksum of that tarball. Install with:
+The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.2.6`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` is `SKIP` until that tag exists; replace it with the checksum of the release tarball after tagging. Install with:
 
 ```bash
 cd packaging/arch
