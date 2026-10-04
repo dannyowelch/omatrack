@@ -74,6 +74,7 @@ cargo run -- --render /tmp/omatrack-showcase.wav /tmp/omatrack-showcase.mod
 ```text
 Enter            edit / browse
 space            play / stop
+Ctrl-R           rewind to order 0, row 0
 ?                key list
 Ctrl-F           file menu: n new, o open, s save, a save as
 Ctrl-S           save (save as, when the module is untitled)
@@ -89,6 +90,8 @@ Home/End         first or last row, or sample
 [ ]              previous / next order position
 , .              previous / next pattern
 ```
+
+`Ctrl-R` rewinds to order 0, row 0. If the song is playing, it keeps playing from the start: channel voices, pattern loops, and the meters are cleared, so a note or a loop cannot keep running from the old position. If the song is stopped, the cursor moves to the start and playback stays stopped. `r` is not that key. In edit mode `r` is the upper-octave F#, and on the sample list `r` renames the instrument. Text entry, the file menu, and the other prompts ignore `Ctrl-R`.
 
 `q` quits from browse mode. `Ctrl-Q` quits from anywhere, including edit mode. `Esc` clears a block, then leaves edit mode, then quits. `Ctrl-C` copies; it does not quit. New and open, from the file menu, ask the same question as quit when the song is modified: `y` saves first, `n` discards, `Esc` cancels. Saving an untitled module opens the path picker. Cancelling that picker cancels the quit, new, or open that was waiting on it.
 
@@ -140,7 +143,7 @@ Truecolor (`ESC[38;2;…m`) is used when `COLORTERM` is `truecolor` or `24bit`, 
 
 `SIGUSR1` reloads the palette (`kill -USR1` the process). So does a change to the theme file, the theme directory, or `theme.name`, which is what an atomic `omarchy-theme-set` swap looks like. The check is a `stat` each frame.
 
-`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo.
+`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo. `Ctrl-R` sends that playhead back to order 0, row 0 without stopping it. The same key, while stopped, only moves the cursor.
 
 Notes use ProTracker octave numbers (`C-1` is period 856, not `C-4`). Sample numbers in the pattern are decimal `01`–`31`. The loop column is `start+length` in bytes, and `-` means the sample does not loop.
 

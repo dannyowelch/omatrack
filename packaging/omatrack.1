@@ -100,6 +100,19 @@ Toggle edit mode.
 .B Space
 Play or stop.
 .TP
+.B Ctrl-R
+Rewind to order 0, row 0.
+If the song is playing, playback continues from the start and channel
+voices, pattern loops, and meters are cleared.
+If the song is stopped, the cursor moves to the start and playback
+stays stopped.
+.B r
+is not this key.
+In edit mode it enters a note, and on the sample list it renames
+the instrument.
+Text entry and the file menu ignore
+.BR Ctrl-R .
+.TP
 .B ?
 Key list.
 .B Esc
