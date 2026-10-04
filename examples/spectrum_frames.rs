@@ -256,9 +256,15 @@ fn paint_cell(rgb: &mut [u8], cell: CellPaint) {
         Ink::Peak => [0xb9, 0x1c, 0x1c],
     };
     let eighths = block_eighths(cell.glyph);
+    let top_eighth = cell.glyph == '▔';
     for y in 0..cell.height {
         let from_bottom = cell.height - 1 - y;
-        let lit = from_bottom * 8 < eighths * cell.height;
+        let from_top = y;
+        let lit = if top_eighth {
+            from_top * 8 < cell.height
+        } else {
+            from_bottom * 8 < eighths * cell.height
+        };
         let color = if lit { fill } else { bg };
         for x in 0..cell.width {
             let index = (((cell.y + y) * cell.stride + (cell.x + x)) * 3) as usize;
@@ -300,6 +306,7 @@ fn block_eighths(glyph: char) -> u32 {
         '▇' => 7,
         '█' => 8,
         '▀' => 4,
+        '▔' => 1,
         _ => 0,
     }
 }

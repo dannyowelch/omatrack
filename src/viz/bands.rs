@@ -212,6 +212,24 @@ pub fn db_unit(magnitude: f32) -> f32 {
     ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0)
 }
 
+/// Display-unit shift when linear gain moves from `old_gain` to `new_gain`.
+///
+/// The bar curve is logarithmic, so a gain change is an offset in `0..=1`
+/// units (`+6 dB` is `6 / -DB_FLOOR`). Held peaks add this instead of reading
+/// the louder scale as a new transient. A non-positive or non-finite gain
+/// contributes no shift.
+pub fn display_shift(old_gain: f32, new_gain: f32) -> f32 {
+    if !old_gain.is_finite() || !new_gain.is_finite() || old_gain <= 1.0e-8 || new_gain <= 1.0e-8 {
+        return 0.0;
+    }
+    let db = 20.0 * (new_gain / old_gain).log10();
+    if db.is_finite() {
+        db / -DB_FLOOR
+    } else {
+        0.0
+    }
+}
+
 /// Hann-normalized, tilted band magnitudes for an interleaved stereo window.
 ///
 /// The mix is averaged to mono. Values are linear (1.0 is about 0 dBFS before
@@ -325,6 +343,12 @@ mod tests {
         assert!((db_unit(mid) - 0.5).abs() < 0.02, "{}", db_unit(mid));
         assert_eq!(db_unit(4.0), 1.0);
         assert_eq!(db_unit(f32::NAN), 0.0);
+        // Doubling the gain is +6.02 dB, about 1/6 of the 36 dB window.
+        let doubled = display_shift(1.0, 2.0);
+        assert!((doubled - 6.0206 / -DB_FLOOR).abs() < 1.0e-3, "{doubled}");
+        assert!(display_shift(2.0, 1.0) < 0.0);
+        assert_eq!(display_shift(1.0, 0.0), 0.0);
+        assert_eq!(display_shift(f32::NAN, 2.0), 0.0);
     }
 
     #[test]

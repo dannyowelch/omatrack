@@ -1,10 +1,9 @@
 //! Geometry of one spectrum column.
 //!
 //! The bar is a solid stack of eighth-blocks in the body color. The peak hold
-//! is a separate one-cell cap in the row above that stack (or higher, while
-//! it is still falling). It is not the bar's own top cell repainted, and it
-//! is not a variable-height block sitting on the floor of whatever row the
-//! peak happened to land in — those both read as detached fragments.
+//! is a thin mark (`▁` or `▔`) in the cell that contains the fractional peak,
+//! on the lower or upper edge of that cell. It is not a half-block or a full
+//! cell, and it is not shoved up a row when it still shares the bar's top cell.
 
 /// What a cell in a spectrum column represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,17 +27,20 @@ pub struct ColumnCell {
 
 const VBLOCK: [char; 9] = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
 
-/// Peak-hold mark. Lower half-block, so the cap sits on the bottom edge of
-/// its cell — directly against the bar when that bar fills the cell below.
-pub const PEAK_CAP: char = '▄';
+/// Thin peak mark on the bottom eighth of its cell.
+pub const PEAK_CAP_LOW: char = '▁';
+/// Thin peak mark on the top eighth of its cell.
+pub const PEAK_CAP_HIGH: char = '▔';
 
 /// Paint one column, top row first.
 ///
-/// `level` and `peak` are `0..=1`. The cap is never drawn inside the bar.
-/// When the held peak still shares the bar's top cell, the cap moves up one
-/// row so it stays a mark above the body instead of recoloring that body.
-/// A peak that has fallen only part of the way sits in its own row, with
-/// empty rows between it and the bar. Non-finite inputs draw an empty column.
+/// `level` and `peak` are `0..=1`. The cap is the eighth that contains the
+/// peak: `▁` on the lower half of that cell, `▔` on the upper half. A peak
+/// that still sits inside the bar's top cell is not drawn — lifting it a
+/// whole row is what stretched a small hold into a floating shelf. A peak
+/// that has fallen only part of the way sits in its own cell, with empty
+/// rows between it and the bar when the gap is that large. Non-finite inputs
+/// draw an empty column.
 pub fn spectrum_column(rows: usize, level: f32, peak: f32) -> Vec<ColumnCell> {
     let mut cells = vec![
         ColumnCell {
@@ -63,28 +65,75 @@ pub fn spectrum_column(rows: usize, level: f32, peak: f32) -> Vec<ColumnCell> {
             };
         }
     }
-    if peak_steps > steps {
-        let bar_top = if steps > 0 {
-            Some((steps - 1) / 8)
-        } else {
-            None
-        };
-        let peak_row = (peak_steps - 1) / 8;
-        let cap_from_bottom = match bar_top {
-            Some(top) => peak_row.max(top + 1),
-            None => peak_row,
-        };
-        if let Some(from_bottom) = (cap_from_bottom < rows).then_some(cap_from_bottom) {
-            let row = rows - 1 - from_bottom;
-            if cells[row].ink != ColumnInk::Body {
-                cells[row] = ColumnCell {
-                    glyph: PEAK_CAP,
-                    ink: ColumnInk::Peak,
-                };
-            }
+    if let Some((from_bottom, glyph)) = peak_placement(rows, steps, peak_steps) {
+        let row = rows - 1 - from_bottom;
+        if cells[row].ink != ColumnInk::Body {
+            cells[row] = ColumnCell {
+                glyph,
+                ink: ColumnInk::Peak,
+            };
         }
     }
     cells
+}
+
+/// Cell and thin glyph for a peak that clears the bar, counted from the bottom.
+///
+/// `steps` and `peak_steps` are eighths, `1..=rows*8`. The same cell as the
+/// bar's top eighth returns `None` so the body glyph stays put.
+fn peak_placement(rows: usize, steps: usize, peak_steps: usize) -> Option<(usize, char)> {
+    if rows == 0 || peak_steps <= steps || peak_steps == 0 {
+        return None;
+    }
+    let eighth = peak_steps - 1;
+    let from_bottom = eighth / 8;
+    if from_bottom >= rows {
+        return None;
+    }
+    let bar_cell = if steps == 0 {
+        None
+    } else {
+        Some((steps - 1) / 8)
+    };
+    if bar_cell == Some(from_bottom) {
+        return None;
+    }
+    let within = eighth % 8;
+    let glyph = if within >= 4 {
+        PEAK_CAP_HIGH
+    } else {
+        PEAK_CAP_LOW
+    };
+    Some((from_bottom, glyph))
+}
+
+/// Sample `values` at display column `index`.
+///
+/// The point is the center of the column, blended between the two bands it
+/// falls between. This is the bar shape. Peak marks are not sampled this way:
+/// each column holds its own. `index` past `columns`, or an empty series, is 0.
+pub fn sample_series(values: &[f32], columns: usize, index: usize) -> f32 {
+    let count = values.len();
+    if count == 0 || columns == 0 || index >= columns {
+        return 0.0;
+    }
+    let sample = |slot: usize| {
+        let value = values.get(slot).copied().unwrap_or(0.0);
+        if value.is_finite() {
+            value.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
+    if count == 1 {
+        return sample(0);
+    }
+    let pos =
+        ((index as f32 + 0.5) * count as f32 / columns as f32 - 0.5).clamp(0.0, (count - 1) as f32);
+    let left = pos.floor() as usize;
+    let right = (left + 1).min(count - 1);
+    let frac = pos - left as f32;
+    sample(left) * (1.0 - frac) + sample(right) * frac
 }
 
 fn quantize(level: f32, total: usize) -> usize {
@@ -100,33 +149,46 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_peak_cap_is_the_cell_above_the_bar() {
-        // 0.50 fills two rows of a four-row column exactly. 0.62 is the next row.
+    fn the_peak_cap_is_a_thin_glyph_at_the_fractional_height() {
+        // 0.50 fills two rows exactly (16 eighths). 0.62 is 20 eighths: cell 2
+        // from the bottom, lower half, so ▁ in the row just above the bar.
         let cells = spectrum_column(4, 0.50, 0.62);
-        assert_eq!(peak_row(&cells) + 1, body_top(&cells));
-        assert_eq!(cells[peak_row(&cells)].glyph, PEAK_CAP);
-        assert!(
+        let cap = peak_row(&cells);
+        assert_eq!(cap, 1, "row from the top: {cells:?}");
+        assert_eq!(cells[cap].glyph, PEAK_CAP_LOW);
+        assert_eq!(cells[cap].ink, ColumnInk::Peak);
+        assert_eq!(body_top(&cells), 2);
+        assert_eq!(
             cells
                 .iter()
                 .filter(|cell| cell.ink == ColumnInk::Peak)
-                .count()
-                == 1
+                .count(),
+            1
         );
         assert!(body_is_contiguous(&cells));
-        assert_ne!(cells[body_top(&cells)].ink, ColumnInk::Peak);
+        assert!(cells
+            .iter()
+            .all(|cell| cell.ink != ColumnInk::Peak || is_thin(cell.glyph)));
+
+        // 0.90 is 29 eighths: top cell, upper half, so ▔.
+        let high = spectrum_column(4, 0.50, 0.90);
+        assert_eq!(high[0].ink, ColumnInk::Peak);
+        assert_eq!(high[0].glyph, PEAK_CAP_HIGH);
+        assert_ne!(high[0].glyph, '▄');
+        assert_ne!(high[0].glyph, '█');
     }
 
     #[test]
-    fn a_peak_inside_the_top_cell_does_not_recolor_the_bar() {
-        // Both land in the same eighth-block row. The cap still steps up one cell.
+    fn a_peak_inside_the_top_cell_does_not_float_a_row_above_the_bar() {
+        // 0.40 is 13 eighths and 0.45 is 14, both in the same cell. Lifting the
+        // cap a full row painted the shelf in the screenshot.
         let cells = spectrum_column(4, 0.40, 0.45);
-        let top = body_top(&cells);
-        let cap = peak_row(&cells);
-        assert_eq!(cap + 1, top, "cap {cap} body {top}: {cells:?}");
-        assert_eq!(cells[top].ink, ColumnInk::Body);
-        assert_ne!(cells[top].glyph, ' ');
-        assert_ne!(cells[top].glyph, PEAK_CAP);
-        assert_eq!(cells[cap].ink, ColumnInk::Peak);
+        assert!(
+            cells.iter().all(|cell| cell.ink != ColumnInk::Peak),
+            "false cap: {cells:?}"
+        );
+        assert_eq!(cells[body_top(&cells)].ink, ColumnInk::Body);
+        assert_ne!(cells[body_top(&cells)].glyph, ' ');
     }
 
     #[test]
@@ -154,6 +216,10 @@ mod tests {
         assert!(spectrum_column(4, f32::NAN, 0.5)
             .iter()
             .all(|cell| cell.ink == ColumnInk::Empty || cell.ink == ColumnInk::Peak));
+    }
+
+    fn is_thin(glyph: char) -> bool {
+        glyph == PEAK_CAP_LOW || glyph == PEAK_CAP_HIGH
     }
 
     fn peak_row(cells: &[ColumnCell]) -> usize {

@@ -16,14 +16,16 @@ mod scope;
 mod state;
 
 pub use agc::{AgcParams, AutoGain};
-pub use ballistics::{smooth_spectrum, Ballistics, Meter};
+pub use ballistics::{advance_column_peaks, smooth_spectrum, Ballistics, Meter, PeakMark};
 pub use bands::{
     band_levels, db_unit, log_bands, spectrum_bars, spectrum_magnitudes, tilt_gain, Band, DB_FLOOR,
     F_MAX_HZ, F_MIN_HZ, TILT_DB_PER_OCTAVE,
 };
 pub(crate) use bus::VizAccum;
 pub use bus::{VizBus, VizSnapshot};
-pub use column::{spectrum_column, ColumnCell, ColumnInk, PEAK_CAP};
+pub use column::{
+    sample_series, spectrum_column, ColumnCell, ColumnInk, PEAK_CAP_HIGH, PEAK_CAP_LOW,
+};
 pub use fft::{apply_hann, magnitudes, windowed_magnitudes};
 pub use scope::{draw_scope, ScopeCanvas, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
 pub use state::{channel_unit, meter_curve, VizState, BARS, METER_FLOOR_DB};

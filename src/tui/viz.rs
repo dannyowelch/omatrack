@@ -23,7 +23,7 @@ pub(crate) const PANEL_HEIGHT: u16 = 6;
 pub(crate) const PANEL_MIN_HEIGHT: u16 = 28;
 
 /// Spectrum bars and four channel meters.
-pub(crate) fn draw_panel(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+pub(crate) fn draw_panel(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let block = Block::bordered()
         .title(Span::styled("  Spectrum", theme.title()))
         .border_style(paint(theme.border, theme.background, false))
@@ -71,7 +71,7 @@ pub(crate) fn draw_scope_view(frame: &mut Frame, area: Rect, app: &App, theme: T
     frame.render_widget(Paragraph::new(lines).style(theme.fill()), canvas_area);
 }
 
-fn panel_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
+fn panel_lines(area: Rect, app: &mut App, theme: Theme) -> Vec<Line<'static>> {
     let rows = usize::from(area.height);
     let width = usize::from(area.width);
     if rows == 0 || width == 0 {
@@ -84,9 +84,11 @@ fn panel_lines(area: Rect, app: &App, theme: Theme) -> Vec<Line<'static>> {
     }
     let empty = theme.fill();
     let mut grid = vec![vec![(' ', empty); columns]; rows];
+    // Peaks are tracked per displayed column, after the bar values are smoothed.
+    app.viz.set_column_count(columns);
     for column in 0..columns {
-        let level = column_value(app, columns, column, false);
-        let peak = column_value(app, columns, column, true).max(level);
+        let level = app.viz.column_level(column);
+        let peak = app.viz.column_peak(column).max(level);
         paint_column(&mut grid, column, level, peak, theme);
     }
     let mut lines = Vec::with_capacity(rows);
@@ -111,31 +113,6 @@ fn meter_for_row(row: usize, rows: usize) -> Option<usize> {
     let start = rows.saturating_sub(4);
     let index = row.checked_sub(start)?;
     (index < 4).then_some(index)
-}
-
-fn column_value(app: &App, columns: usize, index: usize, peak: bool) -> f32 {
-    let count = app.viz.bar_count();
-    if count == 0 || columns == 0 {
-        return 0.0;
-    }
-    let sample = |bar: usize| {
-        if peak {
-            app.viz.bar_peak(bar)
-        } else {
-            app.viz.bar(bar)
-        }
-    };
-    if count == 1 {
-        return sample(0);
-    }
-    // Sample the center of the cell and blend the two bands it lands between,
-    // so a column boundary does not jump to the louder neighbor.
-    let pos =
-        ((index as f32 + 0.5) * count as f32 / columns as f32 - 0.5).clamp(0.0, (count - 1) as f32);
-    let left = pos.floor() as usize;
-    let right = (left + 1).min(count - 1);
-    let frac = pos - left as f32;
-    sample(left) * (1.0 - frac) + sample(right) * frac
 }
 
 fn paint_column(
@@ -313,17 +290,20 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    use crate::viz::PEAK_CAP;
+    use crate::viz::{PEAK_CAP_HIGH, PEAK_CAP_LOW};
 
     #[test]
-    fn the_peak_cap_renders_in_the_cell_above_its_bar() {
+    fn the_peak_cap_renders_as_a_thin_glyph_in_its_own_cell() {
         let theme = Theme::protracker();
         let rows = 4;
         let columns = 3;
         let mut grid = vec![vec![(' ', theme.fill()); columns]; rows];
-        // Close pairs: the held peak shares or just clears the bar's top cell.
-        let levels = [0.40_f32, 0.50, 0.62];
-        let peaks = [0.45_f32, 0.62, 0.70];
+        // 0.50 → 16 eighths (bar fills the bottom two rows). 0.62 → 20 eighths,
+        // lower half of the next cell: ▁ one row above the bar.
+        // 0.90 → 29 eighths, upper half of the top cell: ▔.
+        // 0.40 and 0.45 share a cell, so that column has no floating cap.
+        let levels = [0.50_f32, 0.50, 0.40];
+        let peaks = [0.62_f32, 0.90, 0.45];
         for (column, (level, peak)) in levels.into_iter().zip(peaks).enumerate() {
             paint_column(&mut grid, column, level, peak, theme);
         }
@@ -336,33 +316,28 @@ mod tests {
             })
             .expect("draw");
         let buffer = terminal.backend().buffer().clone();
-        for column in 0..columns {
+        let expect = [Some((1usize, PEAK_CAP_LOW)), Some((0, PEAK_CAP_HIGH)), None];
+        for (column, expected) in expect.into_iter().enumerate() {
             let mut peak_at = None;
-            let mut body_at = None;
             for row in 0..rows {
                 let cell = &buffer[(column as u16, row as u16)];
-                if cell.symbol() == " " {
+                if cell.fg != theme.spectrum_peak || cell.symbol() == " " {
                     continue;
                 }
-                if cell.fg == theme.spectrum_peak {
-                    assert_eq!(
-                        cell.symbol().chars().next(),
-                        Some(PEAK_CAP),
-                        "column {column} row {row}"
-                    );
-                    assert!(peak_at.is_none(), "two caps in column {column}");
-                    peak_at = Some(row);
-                } else if body_at.is_none() {
-                    body_at = Some(row);
-                }
+                let glyph = cell.symbol().chars().next().unwrap();
+                assert!(
+                    glyph == PEAK_CAP_LOW || glyph == PEAK_CAP_HIGH,
+                    "column {column} row {row} drew {glyph}, a tall block"
+                );
+                assert_ne!(glyph, '▄');
+                assert_ne!(glyph, '█');
+                assert!(peak_at.is_none(), "two caps in column {column}");
+                peak_at = Some((row, glyph));
             }
-            let peak_at = peak_at.expect("cap");
-            let body_at = body_at.expect("bar");
-            assert_eq!(
-                peak_at + 1,
-                body_at,
-                "column {column} cap row {peak_at} is not on top of bar row {body_at}"
-            );
+            assert_eq!(peak_at, expected, "column {column}");
         }
+        // The tall cap must not bleed into the short column.
+        let leaked = &buffer[(2, 0)];
+        assert_ne!(leaked.fg, theme.spectrum_peak);
     }
 }
