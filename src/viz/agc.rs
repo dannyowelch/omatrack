@@ -101,17 +101,6 @@ impl AutoGain {
         self.display_gain
     }
 
-    /// Park the applied gain. Tests use this to check peak rescaling without
-    /// waiting out the envelope.
-    #[cfg(test)]
-    pub(crate) fn set_display_gain(&mut self, gain: f32) {
-        self.display_gain = if gain.is_finite() {
-            gain.max(1.0e-6)
-        } else {
-            1.0
-        };
-    }
-
     fn target_gain(&self) -> f32 {
         let gate = if self.params.gate.is_finite() {
             self.params.gate.max(1.0e-8)

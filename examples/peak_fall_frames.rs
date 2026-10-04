@@ -1,4 +1,4 @@
-//! Loud transient, then silence. Writes a frame strip of the spectrum caps.
+//! Loud transient, then silence. Writes a frame strip of the spectrum bars.
 //!
 //!     cargo run --example peak_fall_frames -- /tmp/peak-fall
 
@@ -65,9 +65,7 @@ fn transient_then_silence() -> Vec<Vec<Vec<(char, Ink)>>> {
         state.tick(Some(&snap), FRAME_DT);
         let mut columns = Vec::with_capacity(COLS);
         for index in 0..COLS {
-            let level = state.column_level(index);
-            let peak = state.column_peak(index).max(level);
-            columns.push(paint(level, peak));
+            columns.push(paint(state.column_level(index)));
         }
         frames.push(columns);
     }
@@ -103,14 +101,13 @@ fn silence_snapshot(gen: u64) -> VizSnapshot {
     }
 }
 
-fn paint(level: f32, peak: f32) -> Vec<(char, Ink)> {
-    spectrum_column(ROWS, level, peak)
+fn paint(level: f32) -> Vec<(char, Ink)> {
+    spectrum_column(ROWS, level)
         .into_iter()
         .map(|cell| {
             let ink = match cell.ink {
                 ColumnInk::Empty => Ink::Empty,
                 ColumnInk::Body => Ink::Body,
-                ColumnInk::Peak => Ink::Peak,
             };
             (cell.glyph, ink)
         })
@@ -220,7 +217,6 @@ fn render_spectrum(app: &mut App) -> String {
 enum Ink {
     Empty,
     Body,
-    Peak,
 }
 
 fn write_ppm(path: &std::path::Path, frames: &[Vec<Vec<(char, Ink)>>]) {
@@ -315,7 +311,6 @@ fn paint_cell(rgb: &mut [u8], cell: CellPaint) {
     let fill = match cell.ink {
         Ink::Empty => bg,
         Ink::Body => body_rgb(cell.row),
-        Ink::Peak => [0xb9, 0x1c, 0x1c],
     };
     let eighths = match cell.glyph {
         ' ' => 0,

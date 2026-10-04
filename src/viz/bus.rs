@@ -139,7 +139,8 @@ impl VizAccum {
     ///
     /// `peaks` is the max over this callback. A window that completes here
     /// reports the max of every callback that contributed since the previous
-    /// publish.
+    /// publish. A buffer that completes more than one hop keeps those peaks
+    /// on every window it publishes, including the latest one.
     pub(crate) fn push(&mut self, interleaved: &[i16], peaks: [u16; 4], bus: &VizBus, rate: u32) {
         if rate == 0 {
             return;
@@ -148,6 +149,7 @@ impl VizAccum {
             *slot = (*slot).max(peak);
         }
         let total = interleaved.len() / 2;
+        let mut published = false;
         for frame in 0..total {
             let dst = self.cursor * 2;
             let src = frame * 2;
@@ -161,7 +163,22 @@ impl VizAccum {
             self.since_publish += 1;
             if self.filled == WINDOW && self.since_publish >= HOP {
                 self.publish(bus, rate);
+                published = true;
             }
+        }
+        if !published {
+            return;
+        }
+        // A UI pump (or a device callback) is often longer than one hop, so
+        // this buffer can complete two windows. The latest one is what the
+        // meters read. Clearing peaks on the first publish left that latest
+        // window at zero while the spectrum still had the mix. The tail after
+        // the last publish is part of the next window and keeps this buffer's
+        // peaks; a publish on the final frame has no tail.
+        if self.since_publish == 0 {
+            self.peaks = [0; 4];
+        } else {
+            self.peaks = peaks;
         }
     }
 
@@ -183,7 +200,6 @@ impl VizAccum {
         }
         bus.publish(&self.linear, self.peaks, rate);
         self.since_publish = 0;
-        self.peaks = [0; 4];
     }
 }
 
@@ -237,6 +253,31 @@ mod tests {
         assert_eq!(snap.stereo[(WINDOW - HOP) * 2], 333);
         assert_eq!(snap.stereo[(WINDOW - 1) * 2], 3);
         assert_eq!(snap.peaks[0], 9);
+    }
+
+    #[test]
+    fn a_buffer_longer_than_one_hop_keeps_peaks_on_the_latest_window() {
+        let bus = VizBus::new();
+        let mut accum = VizAccum::new();
+        // Fill the ring. One window, one publish, on the final frame.
+        accum.push(&vec![1i16; WINDOW * 2], [100, 0, 0, 0], &bus, 44_100);
+        assert_eq!(bus.load().expect("first").gen, 1);
+
+        // Two hops in one callback, the way a 20 ms software pump does once
+        // the ring is full. The second publish is the one the UI reads.
+        accum.push(
+            &vec![2i16; (HOP * 2) * 2],
+            [4_000, 2_500, 1_000, 500],
+            &bus,
+            44_100,
+        );
+        let snap = bus.load().expect("latest");
+        assert!(snap.gen >= 3, "gen {}", snap.gen);
+        assert_eq!(
+            snap.peaks,
+            [4_000, 2_500, 1_000, 500],
+            "latest window dropped the channel peaks"
+        );
     }
 
     #[test]
