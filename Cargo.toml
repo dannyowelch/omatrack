@@ -1,0 +1,16 @@
+[package]
+name = "omatrack"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.83"
+description = "ProTracker-style music tracker for Omarchy Linux"
+readme = "README.md"
+repository = "https://github.com/dannyowelch/omatrack"
+keywords = ["mod", "protracker", "tracker", "tui", "amiga"]
+categories = ["command-line-utilities", "multimedia::audio"]
+
+[dependencies]
+# ratatui 0.29 uses crossterm 0.28. Keep the same major so the event loop and
+# the terminal backend share one crossterm.
+crossterm = "0.28.1"
+ratatui = "0.29.0"
