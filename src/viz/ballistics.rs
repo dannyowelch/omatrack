@@ -88,7 +88,7 @@ impl Meter {
     }
 }
 
-fn approach(current: f32, target: f32, dt: f32, tau: f32) -> f32 {
+pub(super) fn approach(current: f32, target: f32, dt: f32, tau: f32) -> f32 {
     if tau <= 1.0e-4 {
         return target;
     }
