@@ -6,6 +6,7 @@
 //! thread. `--render` does not draw any of this; the same functions are what
 //! the tests call.
 
+mod agc;
 mod ballistics;
 mod bands;
 mod bus;
@@ -13,13 +14,17 @@ mod fft;
 mod scope;
 mod state;
 
+pub use agc::{AgcParams, AutoGain};
 pub use ballistics::{Ballistics, Meter};
-pub use bands::{band_levels, log_bands, spectrum_bars, Band, F_MAX_HZ, F_MIN_HZ};
+pub use bands::{
+    band_levels, db_unit, log_bands, spectrum_bars, spectrum_magnitudes, tilt_gain, Band, DB_FLOOR,
+    F_MAX_HZ, F_MIN_HZ, TILT_DB_PER_OCTAVE,
+};
 pub(crate) use bus::VizAccum;
 pub use bus::{VizBus, VizSnapshot};
-pub use fft::{apply_hann, magnitudes};
+pub use fft::{apply_hann, magnitudes, windowed_magnitudes};
 pub use scope::{draw_scope, ScopeCanvas, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
-pub use state::{channel_unit, VizState, BARS};
+pub use state::{channel_unit, meter_curve, VizState, BARS, METER_FLOOR_DB};
 
 /// Samples in one analysis window. Also the FFT length.
 pub const WINDOW: usize = 512;
