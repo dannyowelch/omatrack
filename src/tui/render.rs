@@ -11,44 +11,41 @@ use crate::module::{Cell, Sample, CHANNELS, SAMPLE_NAME_LEN, TITLE_LEN};
 use crate::notes::{effect_description, format_finetune, format_period};
 use crate::waveform::{marker_row, waveform_row};
 
-use super::app::{App, Focus, Overlay, TextTarget};
+use super::app::{App, Focus, Followup, Overlay, TextTarget};
 use super::sample::{FieldKind, FieldPrompt, ImportPrompt, PathKind, PathPrompt};
 use super::theme::{paint, Theme};
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "Enter edit  ? help  Ctrl-S save  space play  q quit";
+const HELP: &str = "Ctrl-F file  Enter edit  ? help  Ctrl-S save  space play  q quit";
 
 const HELP_LINES: &[&str] = &[
     "Omatrack keys                                          ? or Esc closes",
     "Enter edit/browse   Space play/stop   Ctrl-S save   Ctrl-Z undo  Ctrl-Y redo",
-    "Ctrl-Q or q quits from browse. Esc closes a block, leaves edit, then quits.",
+    "Ctrl-Q quits anywhere. q quits from browse. Esc: block, then edit, then quit.",
+    "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
+    "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
     "Arrows move. Tab changes pane; in edit, Tab changes channel.",
     "F1 F2 octave 1-3    F3 F4 step 0-16    Alt-1..4 mute    1-4 mute in browse",
     "",
     "Edit mode. Lower row is the octave, upper row is one octave higher.",
     "  Z S X D C V G B H N J M    C C# D D# E F F# G G# A A# B",
     "  Q 2 W 3 E R 5 T 6 Y 7 U    same notes, one octave higher",
-    "Delete clears the cell, or one digit. Backspace clears one step up.",
-    "Insert inserts a channel row. Ctrl-Backspace deletes that channel row.",
-    "Ctrl-Insert / Ctrl-Delete insert or delete a row on every channel.",
-    "Sample digits are decimal 00-31. Effect and parameter digits are hex.",
-    "A note writes the current sample and moves down by the edit step.",
+    "Delete clears the cell or one digit. Backspace clears one step up.",
+    "Insert inserts a channel row. Ctrl-Backspace deletes it. Ctrl-Insert /",
+    "Ctrl-Delete do that on every channel. Digits: sample decimal, effect hex.",
     "",
     "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
     "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
-    "Ctrl-T edits the title. On Samples, R renames the instrument.",
-    "A * after the title means unsaved. Quit asks before discarding it.",
-    "Samples: i import WAV, o export WAV, Ctrl-G render the song.",
-    "v volume  f finetune  l loop  / toggle loop  t trim  n normalize",
-    "w reverse (R still renames)  a/z fade  c clear  y copy to a slot",
-    "p previews at the note from - and =. u undoes, same stack as Ctrl-Z.",
+    "Ctrl-T title. Samples: R renames. i import WAV, o export, Ctrl-G render.",
+    "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
+    "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
 ];
 
 /// Draw the viewer into `frame`.
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let theme = Theme::protracker();
+    let theme = app.theme;
     let area = frame.area();
     frame.render_widget(Block::default().style(theme.fill()), area);
 
@@ -73,15 +70,20 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     frame.render_widget(
         Paragraph::new(clip(transport_text(app), regions.transport.width)).style(
             if app.audio_error.is_some() {
-                paint(theme.effect, theme.background, false)
+                paint(theme.error, theme.background, false)
             } else {
                 theme.text()
             },
         ),
         regions.transport,
     );
+    let status_style = if app.message_error {
+        paint(theme.error, theme.background, false)
+    } else {
+        theme.text()
+    };
     frame.render_widget(
-        Paragraph::new(clip(status_text(app), regions.status.width)).style(theme.text()),
+        Paragraph::new(clip(status_text(app), regions.status.width)).style(status_style),
         regions.status,
     );
     frame.render_widget(
@@ -89,19 +91,15 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         regions.help,
     );
     match &app.overlay {
-        Overlay::Quit => {
-            let bar = Rect {
-                x: regions.status.x,
-                y: regions.status.y,
-                width: regions.status.width,
-                height: regions.status.height.saturating_add(regions.help.height),
-            };
-            frame.render_widget(
-                Paragraph::new("Unsaved changes.  y save and quit    n discard    Esc cancel")
-                    .style(paint(theme.cursor_fg, theme.cursor_bg, true)),
-                bar,
-            );
-        }
+        Overlay::Quit => draw_guard(frame, regions.status, regions.help, theme, quit_prompt()),
+        Overlay::Guard(followup) => draw_guard(
+            frame,
+            regions.status,
+            regions.help,
+            theme,
+            guard_prompt(followup),
+        ),
+        Overlay::File => draw_file_menu(frame, area, app, theme),
         Overlay::Text { target, buffer } => {
             frame.render_widget(
                 Paragraph::new(clip(text_prompt(target, buffer), regions.status.width))
@@ -130,6 +128,53 @@ fn draw_help(frame: &mut Frame, area: Rect, theme: Theme) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines).style(theme.fill()), area);
+}
+
+fn quit_prompt() -> &'static str {
+    "Unsaved changes.  y save and quit    n discard    Esc cancel"
+}
+
+fn guard_prompt(followup: &Followup) -> &'static str {
+    match followup {
+        Followup::New => "Unsaved changes.  y save, then new    n discard    Esc cancel",
+        Followup::Open => "Unsaved changes.  y save, then open    n discard    Esc cancel",
+        Followup::Quit => quit_prompt(),
+    }
+}
+
+fn draw_guard(frame: &mut Frame, status: Rect, help: Rect, theme: Theme, text: &str) {
+    let bar = Rect {
+        x: status.x,
+        y: status.y,
+        width: status.width,
+        height: status.height.saturating_add(help.height),
+    };
+    frame.render_widget(
+        Paragraph::new(text).style(paint(theme.cursor_fg, theme.cursor_bg, true)),
+        bar,
+    );
+}
+
+fn draw_file_menu(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
+    let path = if app.path.as_os_str().is_empty() {
+        "Untitled".to_string()
+    } else {
+        app.path.display().to_string()
+    };
+    let state = if app.is_dirty() {
+        "unsaved changes"
+    } else {
+        "saved"
+    };
+    let lines = [
+        format!("{path} - {state}"),
+        "n  New module".to_string(),
+        "o  Open...".to_string(),
+        "s  Save".to_string(),
+        "a  Save as...".to_string(),
+        "Esc closes".to_string(),
+    ];
+    draw_dialog(frame, area, "File", &lines, None, theme);
 }
 
 fn text_prompt(target: &TextTarget, buffer: &str) -> String {
@@ -232,16 +277,15 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         lines.push(styled(text, style));
     }
     if inner_h > 1 {
-        lines.push(styled(
-            format!(
-                "Length {}   Restart {}   Patterns {}   {}",
-                app.module.song_length,
-                app.module.restart,
-                app.module.patterns.len(),
-                app.module.tag.as_str(),
-            ),
-            theme.text(),
-        ));
+        let info = format!(
+            "Length {}   Restart {}   Patterns {}   {}   Theme {}",
+            app.module.song_length,
+            app.module.restart,
+            app.module.patterns.len(),
+            app.module.tag.as_str(),
+            fit_chars(&app.theme_label, 24),
+        );
+        lines.push(styled(fit_chars(&info, inner_w), theme.text()));
     }
     let room = inner_h.saturating_sub(lines.len());
     if room > 0 && inner_w > 0 {
@@ -266,7 +310,7 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         ));
     }
     if inner_h > 1 {
-        lines.push(styled(column_header(), theme.dim()));
+        lines.push(column_header_line(theme));
     }
     if let Some(pattern) = app.module.patterns.get(app.view_pattern) {
         let start = app.row_offset;
@@ -293,7 +337,7 @@ fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         let sample = &app.module.samples[app.sample];
         lines.push(styled(
             waveform_row(&sample.data, inner_w),
-            paint(theme.note, theme.background, false),
+            paint(theme.waveform, theme.background, false),
         ));
         let mut points = Vec::new();
         if sample.loops() {
@@ -387,15 +431,19 @@ fn fmt_num(value: usize) -> String {
     }
 }
 
-fn column_header() -> String {
-    let mut line = "   ".to_string();
-    for channel in 1..=CHANNELS {
-        if channel > 1 {
-            line.push_str(" | ");
+fn column_header_line(theme: Theme) -> Line<'static> {
+    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    for channel in 0..CHANNELS {
+        if channel > 0 {
+            spans.push(Span::styled(" | ".to_string(), theme.dim()));
         }
-        line.push_str(&format!("{:<10}", format!("Ch {channel}")));
+        let label = format!("{:<10}", format!("Ch {}", channel + 1));
+        spans.push(Span::styled(
+            label,
+            paint(theme.channels[channel], theme.background, false),
+        ));
     }
-    line
+    Line::from(spans)
 }
 
 fn pattern_row(
@@ -702,6 +750,8 @@ fn draw_path_prompt(frame: &mut Frame, area: Rect, prompt: &PathPrompt, theme: T
         PathKind::ImportWav => "Import WAV",
         PathKind::ExportSample => "Export sample",
         PathKind::ExportSong => "Render song",
+        PathKind::OpenModule => "Open module",
+        PathKind::SaveModule => "Save module",
     };
     let mut lines = Vec::new();
     let list_rows = 8usize;
@@ -811,32 +861,26 @@ fn draw_dialog(
     if let Some(error) = error {
         body.push(styled(
             error.to_string(),
-            paint(theme.effect, theme.background, false),
+            paint(theme.error, theme.background, false),
         ));
     }
     let height = u16::try_from(body.len() + 2)
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(1))
         .max(3);
-    let width = area.width.saturating_sub(4).max(20).min(area.width);
-    let rect = centered(area, width, height);
+    // Full width, so a pattern row number cannot peek out beside the border.
+    let rect = Rect {
+        x: area.x,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width: area.width,
+        height,
+    };
     frame.render_widget(ratatui::widgets::Clear, rect);
     let block = Block::bordered()
         .title(Span::styled(format!(" {title} "), theme.title()))
         .border_style(paint(theme.border_focus, theme.background, false))
         .style(theme.fill());
     frame.render_widget(Paragraph::new(body).block(block), rect);
-}
-
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
 }
 
 fn window_start_simple(selected: usize, len: usize, window: usize) -> usize {

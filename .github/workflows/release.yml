@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    name: Linux binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ALSA headers
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@1.83.0
+      - name: Build
+        run: cargo build --release --locked
+      - name: Stage the binary
+        run: |
+          mkdir -p dist
+          cp target/release/omatrack dist/omatrack-x86_64-unknown-linux-gnu
+          chmod +x dist/omatrack-x86_64-unknown-linux-gnu
+      - name: Attach it to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          asset=dist/omatrack-x86_64-unknown-linux-gnu
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" "$asset" --clobber
+          else
+            gh release create "$tag" "$asset" --title "$tag" --generate-notes
+          fi

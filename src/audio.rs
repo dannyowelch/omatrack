@@ -16,7 +16,7 @@ use crate::module::Module;
 use crate::player::{Playback, PlayerConfig};
 
 /// Shown when the host cannot see an output device.
-pub const NO_DEVICE: &str = "no audio output device is available. PipeWire, PulseAudio, and ALSA did not expose an output; check that a sound server is running and a device is connected";
+pub const NO_DEVICE: &str = "No audio output device. PipeWire, PulseAudio, and ALSA did not expose an output; check that a sound server is running and a device is connected";
 
 /// Where the song is, as of the last time the audio thread ran.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +52,8 @@ pub struct AudioOutput {
     error: Arc<Mutex<Option<String>>>,
     /// Sample rate of the open stream, when there is one.
     rate: Option<u32>,
+    /// Interpolation, separation, and the rate to request from the device.
+    preferences: PlayerConfig,
 }
 
 impl AudioOutput {
@@ -68,6 +70,21 @@ impl AudioOutput {
             })),
             error: Arc::new(Mutex::new(None)),
             rate: None,
+            preferences: PlayerConfig::default(),
+        }
+    }
+
+    /// Mixer settings from the config file. The device rate still wins when it
+    /// cannot play [`PlayerConfig::sample_rate`].
+    pub fn set_preferences(&mut self, config: PlayerConfig) {
+        self.preferences = config;
+    }
+
+    fn mix_config(&self, sample_rate: u32) -> PlayerConfig {
+        PlayerConfig {
+            sample_rate,
+            interpolation: self.preferences.interpolation,
+            stereo_separation: self.preferences.stereo_separation,
         }
     }
 
@@ -83,9 +100,8 @@ impl AudioOutput {
         muted: [bool; 4],
     ) -> Result<(), Error> {
         self.stop();
-        let opened = open_device()?;
-        let mut config = PlayerConfig::default();
-        config.sample_rate = opened.config.sample_rate;
+        let opened = open_device(self.preferences.sample_rate)?;
+        let config = self.mix_config(opened.config.sample_rate);
         self.rate = Some(opened.config.sample_rate);
         let module = module.clone();
         let mut playback = Playback::new(config);
@@ -158,7 +174,7 @@ impl AudioOutput {
         }
         let scratch = crate::player::preview_module(module, sample, period, channel);
         if self.stream.is_none() {
-            let opened = open_device()?;
+            let opened = open_device(self.preferences.sample_rate)?;
             self.rate = Some(opened.config.sample_rate);
             let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
             stream.play().map_err(|err| {
@@ -175,10 +191,7 @@ impl AudioOutput {
             .rate
             .unwrap_or(crate::player::DEFAULT_SAMPLE_RATE)
             .max(1);
-        let config = PlayerConfig {
-            sample_rate: rate,
-            ..PlayerConfig::default()
-        };
+        let config = self.mix_config(rate);
         let mut playback = Playback::new(config);
         playback.start(&scratch, 0, 0);
         let frames = (rate / 5).max(1);
@@ -216,7 +229,7 @@ impl AudioOutput {
             }
         }
         if self.stream.is_none() {
-            let opened = open_device()?;
+            let opened = open_device(self.preferences.sample_rate)?;
             self.rate = Some(opened.config.sample_rate);
             let stream = build_stream(&opened, Arc::clone(&self.shared), Arc::clone(&self.error))?;
             stream.play().map_err(|err| {
@@ -233,11 +246,8 @@ impl AudioOutput {
             .rate
             .unwrap_or(crate::player::DEFAULT_SAMPLE_RATE)
             .max(1);
-        let config = PlayerConfig {
-            sample_rate: rate,
-            stereo_separation: 0,
-            ..PlayerConfig::default()
-        };
+        let mut config = self.mix_config(rate);
+        config.stereo_separation = 0;
         let mut playback = Playback::new(config);
         playback.start(&scratch, 0, 0);
         let frames = rate.saturating_mul(4).max(1);
@@ -316,7 +326,14 @@ struct OpenedDevice {
     name: String,
 }
 
-fn open_device() -> Result<OpenedDevice, Error> {
+fn playable(format: SampleFormat) -> bool {
+    matches!(
+        format,
+        SampleFormat::F32 | SampleFormat::I16 | SampleFormat::U16
+    )
+}
+
+fn open_device(preferred_rate: u32) -> Result<OpenedDevice, Error> {
     let host = cpal::default_host();
     let device = host
         .default_output_device()
@@ -325,27 +342,46 @@ fn open_device() -> Result<OpenedDevice, Error> {
         .description()
         .map(|desc| desc.name().to_string())
         .unwrap_or_else(|_| "default output".to_string());
-    let supported = device.default_output_config().map_err(|err| {
+    let default = device.default_output_config().map_err(|err| {
         Error::Audio(format!(
-            "the output device \"{name}\" has no playable configuration ({err}). PipeWire, PulseAudio, and ALSA all use this device list"
+            "\"{name}\" has no playable output ({err}). PipeWire, PulseAudio, and ALSA all use this device list"
         ))
     })?;
+    let supported = choose_output(&device, preferred_rate).unwrap_or(default);
     let format = supported.sample_format();
-    let config: StreamConfig = supported.into();
-    if !matches!(
-        format,
-        SampleFormat::F32 | SampleFormat::I16 | SampleFormat::U16
-    ) {
+    if !playable(format) {
         return Err(Error::Audio(format!(
-            "the output device \"{name}\" uses {format:?}, which omatrack cannot play. Expected f32, i16, or u16"
+            "\"{name}\" uses {format:?}, which omatrack cannot play. Expected f32, i16, or u16"
         )));
     }
+    let config: StreamConfig = supported.into();
     Ok(OpenedDevice {
         device,
         config,
         format,
         name,
     })
+}
+
+fn choose_output(
+    device: &cpal::Device,
+    preferred_rate: u32,
+) -> Option<cpal::SupportedStreamConfig> {
+    if preferred_rate == 0 {
+        return None;
+    }
+    let ranges = device.supported_output_configs().ok()?;
+    for range in ranges {
+        if !playable(range.sample_format()) {
+            continue;
+        }
+        let min = range.min_sample_rate();
+        let max = range.max_sample_rate();
+        if preferred_rate >= min && preferred_rate <= max {
+            return Some(range.with_sample_rate(preferred_rate));
+        }
+    }
+    None
 }
 
 fn build_stream(

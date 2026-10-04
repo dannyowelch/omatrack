@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use crate::convert::{c2_rate, import_pcm, rate_for_note, ImportOptions, DEFAULT_DITHER_SEED};
 use crate::error::Error;
 use crate::notes::{self, format_period, C2_NOTE};
-use crate::player::{self, PlayerConfig};
+use crate::player;
 use crate::sample_edit;
 use crate::wav::{decode_wav, write_mono8_wav};
 use crate::SAMPLE_COUNT;
@@ -55,6 +55,10 @@ pub(crate) enum PathKind {
     ExportSample,
     /// Mix the song the way `--render` does.
     ExportSong,
+    /// Load a module, replacing the one on screen.
+    OpenModule,
+    /// Write the module to a chosen path.
+    SaveModule,
 }
 
 /// Options shown after a WAV path is accepted.
@@ -168,6 +172,7 @@ impl App {
                 self.open_path(PathKind::ExportSong);
                 Ok(Outcome::None)
             }
+            Command::PathConfirm => Ok(self.confirm_path()),
             Command::PathPush(ch) => {
                 self.path_push(ch);
                 Ok(Outcome::None)
@@ -190,10 +195,6 @@ impl App {
                         prompt.rate_focus = !prompt.rate_focus;
                     }
                 }
-                Ok(Outcome::None)
-            }
-            Command::PathConfirm => {
-                self.confirm_path();
                 Ok(Outcome::None)
             }
             Command::BeginVolume => {
@@ -397,6 +398,10 @@ impl App {
         }
     }
 
+    pub(crate) fn prompt_path(&mut self, kind: PathKind) {
+        self.open_path(kind);
+    }
+
     fn open_path(&mut self, kind: PathKind) {
         let mut prompt = PathPrompt {
             kind,
@@ -425,6 +430,23 @@ impl App {
             PathKind::ExportSong => {
                 let mut path = self.start_dir();
                 path.push("song.wav");
+                prompt.buffer = path.to_string_lossy().into_owned();
+            }
+            PathKind::OpenModule => {
+                let mut text = self.start_dir().to_string_lossy().into_owned();
+                if !text.ends_with('/') {
+                    text.push('/');
+                }
+                prompt.buffer = text;
+            }
+            PathKind::SaveModule => {
+                let path = if self.path.as_os_str().is_empty() {
+                    let mut path = self.start_dir();
+                    path.push("untitled.mod");
+                    path
+                } else {
+                    self.path.clone()
+                };
                 prompt.buffer = path.to_string_lossy().into_owned();
             }
         }
@@ -492,17 +514,17 @@ impl App {
         prompt.move_selection(delta);
     }
 
-    fn confirm_path(&mut self) {
+    fn confirm_path(&mut self) -> Outcome {
         let choice = {
             let super::app::Overlay::Path(prompt) = &mut self.overlay else {
-                return;
+                return Outcome::None;
             };
             let kind = prompt.kind;
             let rate = prompt.rate.clone();
             (prompt.confirm(), kind, rate)
         };
         match choice.0 {
-            PathChoice::Stay => {}
+            PathChoice::Stay => Outcome::None,
             PathChoice::Import(path) => {
                 let finetune = self.module.samples[self.sample].finetune();
                 self.overlay = super::app::Overlay::Import(ImportPrompt {
@@ -514,12 +536,26 @@ impl App {
                     rate_text: None,
                     error: None,
                 });
+                Outcome::None
             }
+            PathChoice::Open(path) => self.open_module_at(path),
             PathChoice::Write(path) => self.write_path(choice.1, path, &choice.2),
         }
     }
 
-    fn write_path(&mut self, kind: PathKind, path: PathBuf, rate_text: &str) {
+    fn open_module_at(&mut self, path: PathBuf) -> Outcome {
+        match crate::Module::load(&path) {
+            Ok(module) => self.install_loaded(module, path),
+            Err(err) => {
+                if let super::app::Overlay::Path(prompt) = &mut self.overlay {
+                    prompt.error = Some(format!("Could not open {}: {err}", path.display()));
+                }
+                Outcome::None
+            }
+        }
+    }
+
+    fn write_path(&mut self, kind: PathKind, path: PathBuf, rate_text: &str) -> Outcome {
         match kind {
             PathKind::ExportSample => {
                 let finetune = self.module.samples[self.sample].finetune_raw;
@@ -529,7 +565,7 @@ impl App {
                         if let super::app::Overlay::Path(prompt) = &mut self.overlay {
                             prompt.error = Some(message);
                         }
-                        return;
+                        return Outcome::None;
                     }
                 };
                 let data = self.module.samples[self.sample].data.clone();
@@ -543,14 +579,16 @@ impl App {
                             data.len()
                         ));
                     }
-                    Err(err) => self.message = Some(err.to_string()),
+                    Err(err) => self.set_error(err.to_string()),
                 }
+                Outcome::None
             }
             PathKind::ExportSong => {
                 self.overlay = super::app::Overlay::None;
-                let config = PlayerConfig::default();
-                let max_frames = usize::try_from(u64::from(config.sample_rate).saturating_mul(600))
-                    .unwrap_or(usize::MAX);
+                let config = self.player;
+                let max_frames = (self.max_seconds * f64::from(config.sample_rate.max(1)))
+                    .round()
+                    .clamp(1.0, u32::MAX as f64) as usize;
                 match player::render_to_wav(&self.module, &path, config, max_frames) {
                     Ok(stats) => {
                         let seconds = stats.frames as f64 / f64::from(stats.sample_rate.max(1));
@@ -560,10 +598,31 @@ impl App {
                             stats.sample_rate
                         ));
                     }
-                    Err(err) => self.message = Some(err.to_string()),
+                    Err(err) => self.set_error(err.to_string()),
                 }
+                Outcome::None
             }
-            PathKind::ImportWav => {}
+            PathKind::SaveModule => match self.module.save(&path) {
+                Ok(()) => {
+                    let name = path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or("module")
+                        .to_string();
+                    self.path = path;
+                    self.editor.mark_saved();
+                    self.overlay = super::app::Overlay::None;
+                    self.set_message(format!("Saved {name}"));
+                    Outcome::Saved
+                }
+                Err(err) => {
+                    if let super::app::Overlay::Path(prompt) = &mut self.overlay {
+                        prompt.error = Some(err.to_string());
+                    }
+                    Outcome::None
+                }
+            },
+            PathKind::ImportWav | PathKind::OpenModule => Outcome::None,
         }
     }
 
@@ -770,6 +829,7 @@ enum PathChoice {
     Stay,
     Import(PathBuf),
     Write(PathBuf),
+    Open(PathBuf),
 }
 
 impl PathPrompt {
@@ -864,7 +924,7 @@ impl PathPrompt {
                 }
                 PathChoice::Import(path)
             }
-            PathKind::ExportSample | PathKind::ExportSong => {
+            PathKind::ExportSample | PathKind::ExportSong | PathKind::SaveModule => {
                 if self.buffer.ends_with('/') {
                     self.error = Some("Enter a file name".to_string());
                     return PathChoice::Stay;
@@ -877,6 +937,13 @@ impl PathPrompt {
                     }
                 }
                 PathChoice::Write(path)
+            }
+            PathKind::OpenModule => {
+                if !path.is_file() {
+                    self.error = Some(format!("No such file: {}", path.display()));
+                    return PathChoice::Stay;
+                }
+                PathChoice::Open(path)
             }
         }
     }
@@ -913,8 +980,16 @@ fn read_dir_rows(dir: &Path, kind: PathKind) -> Result<Vec<DirRow>, String> {
             continue;
         }
         let is_dir = entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false);
-        if !is_dir && kind == PathKind::ImportWav && !name.to_ascii_lowercase().ends_with(".wav") {
-            continue;
+        if !is_dir {
+            let lower = name.to_ascii_lowercase();
+            let hidden_type = match kind {
+                PathKind::ImportWav => !lower.ends_with(".wav"),
+                PathKind::OpenModule => !lower.ends_with(".mod"),
+                PathKind::ExportSample | PathKind::ExportSong | PathKind::SaveModule => false,
+            };
+            if hidden_type {
+                continue;
+            }
         }
         files.push(DirRow { name, is_dir });
     }

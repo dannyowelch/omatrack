@@ -12,7 +12,10 @@ use crate::edit::{
 use crate::module::{
     Cell, Module, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT, SAMPLE_NAME_LEN, TITLE_LEN,
 };
-use crate::player::{DEFAULT_SPEED, DEFAULT_TEMPO};
+use crate::player::{PlayerConfig, DEFAULT_SPEED, DEFAULT_TEMPO};
+
+use super::sample::PathKind;
+use super::theme::Theme;
 
 /// Which pane receives movement keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -267,6 +270,18 @@ pub enum Command {
     ImportRateBackspace,
     /// Convert the chosen WAV into the current sample.
     ImportConfirm,
+    /// Open the file menu.
+    ShowFile,
+    /// New module, asking first when the song is modified.
+    NewModule,
+    /// Open a module, asking first when the song is modified.
+    OpenModule,
+    /// Ask for a path and write the module there.
+    SaveAs,
+    /// Save, then run the pending file action.
+    GuardSave,
+    /// Drop edits and run the pending file action.
+    GuardDiscard,
 }
 
 /// What the audio side should do after [`App::apply`].
@@ -300,6 +315,21 @@ pub enum Outcome {
         /// Finetune-0 period.
         period: u16,
     },
+    /// The command wrote the module itself. Run any pending file action.
+    Saved,
+    /// The in-memory module was replaced. Stop the stream.
+    DocumentReplaced,
+}
+
+/// What to do after a save that was started by new, open, or quit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Followup {
+    /// Leave the tracker.
+    Quit,
+    /// Replace the song with an empty module.
+    New,
+    /// Ask for a module to load.
+    Open,
 }
 
 /// What is covering the tracker.
@@ -324,6 +354,10 @@ pub(crate) enum Overlay {
     Import(super::sample::ImportPrompt),
     /// Volume, finetune, loop, trim, or a copy destination.
     Field(super::sample::FieldPrompt),
+    /// New, open, save, and save as.
+    File,
+    /// Ask before new, open, or another action that would drop edits.
+    Guard(Followup),
 }
 
 /// Title or one sample name.
@@ -366,8 +400,20 @@ pub struct App {
     /// Last failure from opening the audio device, shown in the transport bar.
     pub(crate) audio_error: Option<String>,
     pub(crate) message: Option<String>,
+    /// [`Self::message`] is a failure, drawn in the error color.
+    pub(crate) message_error: bool,
     /// A conversion warning that stays up after the next key clears [`Self::message`].
     pub(crate) notice: Option<String>,
+    /// Colors for this session.
+    pub(crate) theme: Theme,
+    /// Name shown in the song header.
+    pub(crate) theme_label: String,
+    /// Mixer knobs for preview, playback, and the in-app render.
+    pub(crate) player: PlayerConfig,
+    /// Cap for the in-app song render, in seconds.
+    pub(crate) max_seconds: f64,
+    /// Set while a save should be followed by new, open, or quit.
+    pub(crate) followup: Option<Followup>,
     /// Finetune-0 note index used by sample audition. C-2 until `-` or `=` moves it.
     pub(crate) preview_note: usize,
     pub(crate) overlay: Overlay,
@@ -407,7 +453,13 @@ impl App {
             muted: [false; CHANNELS],
             audio_error: None,
             message: None,
+            message_error: false,
             notice: None,
+            theme: Theme::protracker(),
+            theme_label: "protracker".to_string(),
+            player: PlayerConfig::default(),
+            max_seconds: crate::config::DEFAULT_MAX_SECONDS,
+            followup: None,
             preview_note: crate::notes::C2_NOTE,
             overlay: Overlay::None,
             selection: None,
@@ -446,7 +498,39 @@ impl App {
 
     /// Show `message` on the status line until the next key.
     pub(crate) fn set_message(&mut self, message: impl Into<String>) {
+        self.message_error = false;
         self.message = Some(message.into());
+    }
+
+    /// Show `message` in the error color until the next key.
+    pub(crate) fn set_error(&mut self, message: impl Into<String>) {
+        self.message_error = true;
+        self.message = Some(message.into());
+    }
+
+    /// Replace the palette. An Omarchy reload calls this without resetting the song.
+    pub fn set_theme(&mut self, theme: Theme, label: impl Into<String>) {
+        self.theme = theme;
+        self.theme_label = label.into();
+    }
+
+    /// Octave, step, and mixer settings from the config file or the command line.
+    pub fn set_preferences(
+        &mut self,
+        octave: u8,
+        step: u8,
+        player: PlayerConfig,
+        max_seconds: f64,
+    ) {
+        self.octave = octave;
+        self.step = step;
+        self.player = player;
+        self.max_seconds = max_seconds;
+    }
+
+    /// Take the action armed by a save-and-continue prompt.
+    pub(crate) fn take_followup(&mut self) -> Option<Followup> {
+        self.followup.take()
     }
 
     /// Leave the UI even if a prompt is up.
@@ -480,11 +564,24 @@ impl App {
     /// Apply one command. Movement past either end sticks.
     pub fn apply(&mut self, command: Command) -> Outcome {
         self.message = None;
+        self.message_error = false;
         match command {
-            Command::Save => Outcome::Save,
+            Command::Save => self.save_command(),
             Command::SaveAndQuit => {
-                self.overlay = Overlay::None;
-                Outcome::SaveAndQuit
+                self.followup = Some(Followup::Quit);
+                self.save_command()
+            }
+            Command::GuardSave => self.save_command(),
+            Command::GuardDiscard => self.discard_followup(),
+            Command::ShowFile => {
+                self.overlay = Overlay::File;
+                Outcome::None
+            }
+            Command::NewModule => self.request_new(),
+            Command::OpenModule => self.request_open(),
+            Command::SaveAs => {
+                self.prompt_path(PathKind::SaveModule);
+                Outcome::None
             }
             Command::QuitAsk => self.ask_quit(),
             Command::QuitDiscard => {
@@ -492,6 +589,7 @@ impl App {
                 Outcome::None
             }
             Command::CloseOverlay | Command::TextCancel => {
+                self.followup = None;
                 self.overlay = Overlay::None;
                 Outcome::None
             }
@@ -581,6 +679,109 @@ impl App {
         self.selection.is_some_and(|selection| {
             selection.pattern == self.view_pattern && selection.range().contains(row, channel)
         })
+    }
+
+    fn save_command(&mut self) -> Outcome {
+        if self.path.as_os_str().is_empty() {
+            self.prompt_path(PathKind::SaveModule);
+            Outcome::None
+        } else {
+            self.overlay = Overlay::None;
+            Outcome::Save
+        }
+    }
+
+    fn request_new(&mut self) -> Outcome {
+        if self.is_dirty() {
+            self.followup = Some(Followup::New);
+            self.overlay = Overlay::Guard(Followup::New);
+            Outcome::None
+        } else {
+            self.install_blank()
+        }
+    }
+
+    fn request_open(&mut self) -> Outcome {
+        if self.is_dirty() {
+            self.followup = Some(Followup::Open);
+            self.overlay = Overlay::Guard(Followup::Open);
+            Outcome::None
+        } else {
+            self.prompt_path(PathKind::OpenModule);
+            Outcome::None
+        }
+    }
+
+    fn discard_followup(&mut self) -> Outcome {
+        let followup = self.followup.take();
+        self.overlay = Overlay::None;
+        match followup {
+            Some(Followup::New) => self.install_blank(),
+            Some(Followup::Open) => {
+                self.prompt_path(PathKind::OpenModule);
+                Outcome::None
+            }
+            Some(Followup::Quit) => {
+                self.quit_now();
+                Outcome::None
+            }
+            None => Outcome::None,
+        }
+    }
+
+    /// Replace the song with an empty module and stop playback.
+    pub(crate) fn install_blank(&mut self) -> Outcome {
+        self.module = Module::new(crate::module::Tag::Mk);
+        self.path.clear();
+        self.editor = Editor::new();
+        self.clipboard = Clipboard::default();
+        self.finish_replaced("New module")
+    }
+
+    /// Replace the song with `module` from `path` and stop playback.
+    pub(crate) fn install_loaded(&mut self, module: Module, path: PathBuf) -> Outcome {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module");
+        let message = format!("Opened {name}");
+        self.module = module;
+        self.path = path;
+        self.editor = Editor::new();
+        self.clipboard = Clipboard::default();
+        self.finish_replaced(&message)
+    }
+
+    fn finish_replaced(&mut self, message: &str) -> Outcome {
+        self.reset_view();
+        self.playing = false;
+        self.message = Some(message.to_string());
+        Outcome::DocumentReplaced
+    }
+
+    fn reset_view(&mut self) {
+        self.focus = Focus::Pattern;
+        self.editing = false;
+        self.field = Field::Note;
+        self.order_pos = 0;
+        let pattern = usize::from(self.module.order[0]);
+        self.view_pattern = if pattern < self.module.patterns.len() {
+            pattern
+        } else {
+            0
+        };
+        self.row = 0;
+        self.channel = 0;
+        self.sample = 0;
+        self.row_offset = 0;
+        self.sample_offset = 0;
+        self.selection = None;
+        self.overlay = Overlay::None;
+        self.audio_error = None;
+        self.notice = None;
+        self.speed = DEFAULT_SPEED;
+        self.tempo = DEFAULT_TEMPO;
+        self.muted = [false; CHANNELS];
     }
 
     fn ask_quit(&mut self) -> Outcome {
@@ -1039,6 +1240,8 @@ pub fn command_for(app: &App, key: Key) -> Option<Command> {
         Overlay::Path(_) => return super::sample::path_command(key),
         Overlay::Import(_) => return super::sample::import_command(key),
         Overlay::Field(_) => return super::sample::field_command(key),
+        Overlay::File => return file_menu_key(key),
+        Overlay::Guard(_) => return guard_key(key),
         Overlay::None => {}
     }
     if matches!(key, Key::Esc) {
@@ -1068,6 +1271,26 @@ fn help_key(key: Key) -> Option<Command> {
         Key::Esc | Key::Enter | Key::Char('?') | Key::Char('q') | Key::Char('Q') => {
             Some(Command::CloseOverlay)
         }
+        _ => None,
+    }
+}
+
+fn file_menu_key(key: Key) -> Option<Command> {
+    match fold_case(key) {
+        Key::Esc | Key::Char('q') | Key::Ctrl('f') => Some(Command::CloseOverlay),
+        Key::Char('n') => Some(Command::NewModule),
+        Key::Char('o') => Some(Command::OpenModule),
+        Key::Char('s') => Some(Command::Save),
+        Key::Char('a') => Some(Command::SaveAs),
+        _ => None,
+    }
+}
+
+fn guard_key(key: Key) -> Option<Command> {
+    match fold_case(key) {
+        Key::Char('y') => Some(Command::GuardSave),
+        Key::Char('n') => Some(Command::GuardDiscard),
+        Key::Esc => Some(Command::CloseOverlay),
         _ => None,
     }
 }
@@ -1104,6 +1327,7 @@ fn esc_command(app: &App) -> Command {
 fn global_key(key: Key) -> Option<Command> {
     match key {
         Key::Ctrl('s') => Some(Command::Save),
+        Key::Ctrl('f') => Some(Command::ShowFile),
         Key::Ctrl('g') => Some(Command::BeginExportSong),
         Key::Ctrl('z') => Some(Command::Undo),
         Key::Ctrl('y') => Some(Command::Redo),
@@ -1536,5 +1760,43 @@ mod tests {
         assert_eq!(loaded.patterns[0].rows[0][0].period, 428);
         assert_eq!(loaded.patterns[0].rows[0][0].sample, 1);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn file_menu_asks_before_replacing_a_dirty_song_and_save_as_needs_a_path() {
+        let mut app = app_with_patterns(1);
+        assert_eq!(command_for(&app, Key::Ctrl('f')), Some(Command::ShowFile));
+        app.apply(Command::ShowFile);
+        assert!(matches!(app.overlay, Overlay::File));
+        assert_eq!(command_for(&app, Key::Char('n')), Some(Command::NewModule));
+        assert!(matches!(
+            app.apply(Command::NewModule),
+            Outcome::DocumentReplaced
+        ));
+        assert!(!app.is_dirty());
+        assert!(app.path.as_os_str().is_empty());
+        assert_eq!(app.message.as_deref(), Some("New module"));
+
+        app.apply(Command::ToggleEdit);
+        app.apply(Command::EnterNote(0));
+        assert!(app.is_dirty());
+        app.apply(Command::ShowFile);
+        app.apply(command_for(&app, Key::Char('O')).unwrap());
+        assert!(matches!(app.overlay, Overlay::Guard(Followup::Open)));
+        app.apply(command_for(&app, Key::Esc).unwrap());
+        assert!(app.is_dirty());
+        assert!(matches!(app.overlay, Overlay::None));
+
+        app.apply(Command::NewModule);
+        assert!(matches!(app.overlay, Overlay::Guard(Followup::New)));
+        assert!(matches!(
+            app.apply(Command::GuardDiscard),
+            Outcome::DocumentReplaced
+        ));
+        assert!(!app.is_dirty());
+
+        app.apply(Command::EnterNote(0));
+        assert!(matches!(app.apply(Command::Save), Outcome::None));
+        assert!(matches!(app.overlay, Overlay::Path(_)));
     }
 }

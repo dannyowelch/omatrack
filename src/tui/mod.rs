@@ -2,7 +2,7 @@
 //!
 //! [`App`] holds the cursor and the edit commands. [`draw`] paints them.
 //! [`run`] owns the terminal and, while playback is on, the audio stream.
-//! Milestone 5 can replace [`Theme`](theme::Theme).
+//! [`Theme`](theme::Theme) is a built-in palette or the active Omarchy theme.
 
 mod app;
 mod render;
@@ -11,10 +11,42 @@ mod theme;
 
 pub use app::{command_for, App, Command, Focus, Key, Outcome};
 pub use render::draw;
-pub use theme::Theme;
+pub use theme::{detect_color_depth, ColorDepth, Theme};
+
+use std::path::Path;
+
+/// Palette chosen for this launch, plus the files to watch.
+pub struct ThemeChoice {
+    /// Colors.
+    pub theme: Theme,
+    /// Song-header label.
+    pub label: String,
+    /// Paths passed to [`Session::theme_watch`].
+    pub watch: Vec<PathBuf>,
+    /// Set when an explicit Omarchy theme could not be read.
+    pub warning: Option<String>,
+}
+
+/// Resolve `request` the same way the running tracker does.
+pub fn load_theme(
+    request: ThemeRequest,
+    depth: ColorDepth,
+    home: &Path,
+    xdg_state_home: Option<&Path>,
+) -> ThemeChoice {
+    let loaded = theme::resolve(request, depth, home, xdg_state_home);
+    ThemeChoice {
+        theme: loaded.theme,
+        label: loaded.label,
+        watch: loaded.watch.paths,
+        warning: loaded.warning,
+    }
+}
 
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::cursor::{Hide, Show};
@@ -27,25 +59,88 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
 use crate::audio::AudioOutput;
+use crate::config::{self, ThemeRequest};
 use crate::error::Error;
 use crate::module::Module;
+use crate::player::PlayerConfig;
 
-use self::app::Key as AppKey;
+use self::app::{Followup, Key as AppKey};
+use self::sample::PathKind;
+use self::theme::{LoadedTheme, ThemeWatch};
 
-/// Show `module` until the user quits. Ctrl-S writes it back to `path`.
+/// Everything the terminal loop needs besides the module itself.
+pub struct Session {
+    /// Song to show. An empty module is a new file.
+    pub module: Module,
+    /// Where Ctrl-S writes. Empty until the user picks a path.
+    pub path: PathBuf,
+    /// Palette already resolved for this launch.
+    pub theme: Theme,
+    /// Song-header label.
+    pub theme_label: String,
+    /// Files whose mtime should reload the palette.
+    pub theme_watch: Vec<PathBuf>,
+    /// Request to resolve again on SIGUSR1 or a theme-file change.
+    pub theme_request: ThemeRequest,
+    /// Truecolor, 256, or 16, chosen at startup.
+    pub color_depth: ColorDepth,
+    /// Mixer knobs.
+    pub player: PlayerConfig,
+    /// Cap for the in-app song render.
+    pub max_seconds: f64,
+    /// Piano octave.
+    pub octave: u8,
+    /// Edit step.
+    pub step: u8,
+    /// Shown once, in the error color. Config and theme warnings land here.
+    pub notice: Option<String>,
+}
+
+/// Show `session` until the user quits.
 ///
 /// Space starts playback from the cursor. Enter toggles edit mode. If no
 /// output device can be opened, the transport bar shows the error and the
-/// view stays up. Note preview is skipped when that happens.
-pub fn run(module: Module, path: PathBuf) -> Result<(), Error> {
+/// view stays up. Note preview is skipped when that happens. The terminal is
+/// restored on quit and on panic. SIGUSR1, or a change to the watched theme
+/// files, reloads the palette.
+pub fn run(session: Session) -> Result<(), Error> {
+    install_panic_hook();
+    let reload = install_reload_flag();
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
     let mut terminal = Terminal::new(backend).map_err(Error::Terminal)?;
     terminal.clear().map_err(Error::Terminal)?;
 
+    let Session {
+        module,
+        path,
+        theme,
+        theme_label,
+        theme_watch,
+        theme_request,
+        color_depth,
+        player,
+        max_seconds,
+        octave,
+        step,
+        notice,
+    } = session;
     let mut app = App::open(module, path);
+    app.set_theme(theme, theme_label);
+    app.set_preferences(octave, step, player, max_seconds);
+    if let Some(notice) = notice {
+        app.set_error(notice);
+    }
     let mut audio = AudioOutput::new();
+    audio.set_preferences(app.player);
+    let home = config::home_dir();
+    let state = config::xdg_state_home();
+    let mut watch = ThemeWatch::new(theme_watch);
     loop {
+        if reload.swap(false, Ordering::Relaxed) || watch.changed() {
+            let loaded = theme::resolve(theme_request, color_depth, &home, state.as_deref());
+            apply_theme(&mut app, &mut watch, loaded);
+        }
         if app.playing {
             if let Some(message) = audio.take_error() {
                 audio.stop();
@@ -64,10 +159,14 @@ pub fn run(module: Module, path: PathBuf) -> Result<(), Error> {
             .map_err(Error::Terminal)?;
         let wait = if app.playing { 20 } else { 200 };
         if event::poll(Duration::from_millis(wait)).map_err(Error::Terminal)? {
-            if let Event::Key(key) = event::read().map_err(Error::Terminal)? {
-                if let Some(command) = map_key(key).and_then(|key| command_for(&app, key)) {
-                    handle_command(&mut app, &mut audio, command);
+            match event::read().map_err(Error::Terminal)? {
+                Event::Key(key) => {
+                    if let Some(command) = map_key(key).and_then(|key| command_for(&app, key)) {
+                        handle_command(&mut app, &mut audio, command);
+                    }
                 }
+                Event::Resize(_, _) => {}
+                _ => {}
             }
         }
         if app.should_quit() {
@@ -76,6 +175,29 @@ pub fn run(module: Module, path: PathBuf) -> Result<(), Error> {
     }
     audio.stop();
     Ok(())
+}
+
+fn apply_theme(app: &mut App, watch: &mut ThemeWatch, loaded: LoadedTheme) {
+    let changed = loaded.label != app.theme_label || loaded.theme != app.theme;
+    let label = loaded.label.clone();
+    app.set_theme(loaded.theme, label);
+    *watch = loaded.watch;
+    if let Some(warning) = loaded.warning {
+        app.set_error(warning);
+    } else if changed {
+        app.set_message(format!("Theme {}", app.theme_label));
+    }
+}
+
+fn install_reload_flag() -> Arc<AtomicBool> {
+    let flag = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        // A theme switcher can `kill -USR1` this process. Missing the signal
+        // still leaves the mtime watch, so a theme swap is noticed either way.
+        let _ = signal_hook::flag::register(signal_hook::consts::SIGUSR1, Arc::clone(&flag));
+    }
+    flag
 }
 
 fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
@@ -110,13 +232,14 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
                 audio.replace_module(&app.module);
             }
         }
-        Outcome::Save => {
-            persist(app);
-        }
-        Outcome::SaveAndQuit => {
+        Outcome::Save | Outcome::SaveAndQuit => {
             if persist(app) {
-                app.quit_now();
+                apply_followup(app, audio);
             }
+        }
+        Outcome::Saved => apply_followup(app, audio),
+        Outcome::DocumentReplaced => {
+            audio.stop();
         }
         Outcome::Audition { slot, period } => {
             if let Err(err) = audio.audition(&app.module, slot, period) {
@@ -128,6 +251,10 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
 }
 
 fn persist(app: &mut App) -> bool {
+    if app.path.as_os_str().is_empty() {
+        app.prompt_path(PathKind::SaveModule);
+        return false;
+    }
     match app.save() {
         Ok(()) => {
             let name = app
@@ -139,9 +266,25 @@ fn persist(app: &mut App) -> bool {
             true
         }
         Err(message) => {
-            app.set_message(message);
+            let _ = app.take_followup();
+            app.set_error(message);
             false
         }
+    }
+}
+
+fn apply_followup(app: &mut App, audio: &mut AudioOutput) {
+    match app.take_followup() {
+        Some(Followup::Quit) => {
+            audio.stop();
+            app.quit_now();
+        }
+        Some(Followup::New) => {
+            let _ = app.install_blank();
+            audio.stop();
+        }
+        Some(Followup::Open) => app.prompt_path(PathKind::OpenModule),
+        None => {}
     }
 }
 
@@ -219,9 +362,21 @@ impl TerminalGuard {
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
-        let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
-        let _ = disable_raw_mode();
+        restore_terminal();
     }
+}
+
+fn restore_terminal() {
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, Show);
+    let _ = disable_raw_mode();
+}
+
+fn install_panic_hook() {
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        restore_terminal();
+        previous(info);
+    }));
 }
 
 #[cfg(test)]
