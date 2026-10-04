@@ -1,11 +1,16 @@
 //! Smoothed levels the UI draws. The FFT runs here, on the thread that calls
 //! [`VizState::tick`], never inside the audio callback.
 
+use super::agc::AutoGain;
 use super::ballistics::{Ballistics, Meter};
-use super::bands::spectrum_bars;
+use super::bands::{db_unit, spectrum_magnitudes};
 use super::bus::VizSnapshot;
 use super::WINDOW;
 use crate::player::CHANNEL_PEAK_SCALE;
+
+/// Bottom of the channel-meter curve. 0 dBFS is the top of the meter.
+/// A loud channel around −12..−6 dBFS lands near 60–80%.
+pub const METER_FLOOR_DB: f32 = -30.0;
 
 /// How many log bars the analyzer keeps. The panel samples these into columns.
 pub const BARS: usize = 48;
@@ -19,6 +24,7 @@ pub struct VizState {
     phase: f32,
     last_gen: u64,
     stale: f32,
+    agc: AutoGain,
 }
 
 impl Default for VizState {
@@ -30,6 +36,7 @@ impl Default for VizState {
             phase: 0.0,
             last_gen: 0,
             stale: 0.0,
+            agc: AutoGain::default(),
         }
     }
 }
@@ -69,10 +76,12 @@ impl VizState {
     }
 
     fn ingest(&mut self, snap: &VizSnapshot, dt: f32) {
-        let targets = spectrum_bars(&snap.stereo, snap.rate, BARS);
+        let magnitudes = spectrum_magnitudes(&snap.stereo, snap.rate, BARS);
+        let peak = magnitudes.iter().copied().fold(0.0f32, f32::max);
+        let gain = self.agc.update(peak, dt);
         let ballistics = Ballistics::spectrum();
-        for (meter, target) in self.bars.iter_mut().zip(targets) {
-            meter.update(target, dt, ballistics);
+        for (meter, magnitude) in self.bars.iter_mut().zip(magnitudes) {
+            meter.update(db_unit(magnitude * gain), dt, ballistics);
         }
         let meter_ballistics = Ballistics::meter();
         for (meter, peak) in self.meters.iter_mut().zip(snap.peaks) {
@@ -90,6 +99,8 @@ impl VizState {
     }
 
     fn release(&mut self, dt: f32) {
+        // Below the gate the normalizer holds, so a gap does not crank the gain.
+        let _ = self.agc.update(0.0, dt);
         let ballistics = Ballistics::spectrum();
         for meter in &mut self.bars {
             meter.update(0.0, dt, ballistics);
@@ -134,9 +145,22 @@ impl VizState {
     }
 }
 
-/// Map a mixer peak onto `0..=1`.
+/// Map a linear peak in `0..=1` through [`METER_FLOOR_DB`].
+///
+/// Full scale stays at the top. A typical loud channel (roughly a quarter to
+/// a half of [`CHANNEL_PEAK_SCALE`]) lands around 60–80% instead of looking
+/// half empty. Silence and non-finite values are 0.
+pub fn meter_curve(linear: f32) -> f32 {
+    if !linear.is_finite() || linear <= 0.0 {
+        return 0.0;
+    }
+    let db = 20.0 * linear.clamp(0.0, 1.0).max(1.0e-8).log10();
+    ((db - METER_FLOOR_DB) / -METER_FLOOR_DB).clamp(0.0, 1.0)
+}
+
+/// Map a mixer peak onto `0..=1` with [`meter_curve`].
 pub fn channel_unit(peak: u16) -> f32 {
-    (f32::from(peak) / f32::from(CHANNEL_PEAK_SCALE)).clamp(0.0, 1.0)
+    meter_curve(f32::from(peak) / f32::from(CHANNEL_PEAK_SCALE))
 }
 
 #[cfg(test)]
@@ -194,5 +218,46 @@ mod tests {
         state.tick(None, 0.10);
         state.tick(None, 0.20);
         assert!(state.meter(0).0 < before, "{}", state.meter(0).0);
+    }
+
+    #[test]
+    fn a_quiet_tone_rises_with_the_normalizer_instead_of_jumping() {
+        let mut state = VizState::new();
+        let mut snap = sine_snapshot(440.0, [0, 0, 0, 0], 1);
+        for index in 0..WINDOW {
+            let sample = ((std::f32::consts::TAU * 440.0 * index as f32) / 44_100.0).sin();
+            let value = (sample * 1_600.0) as i16;
+            snap.stereo[index * 2] = value;
+            snap.stereo[index * 2 + 1] = value;
+        }
+        state.tick(Some(&snap), 0.05);
+        let early = max_bar(&state);
+        for generation in 2..50 {
+            snap.gen = generation;
+            state.tick(Some(&snap), 0.05);
+        }
+        let later = max_bar(&state);
+        assert!(early < 0.8, "first frame already filled the panel: {early}");
+        assert!(later > early + 0.1, "early {early}, later {later}");
+        assert!(later > 0.75, "quiet tone never came up: {later}");
+    }
+
+    #[test]
+    fn meter_curve_lifts_a_loud_channel_into_the_upper_half() {
+        let half = meter_curve(0.5);
+        let quarter = meter_curve(0.25);
+        assert!((0.70..=0.90).contains(&half), "{half}");
+        assert!((0.55..=0.75).contains(&quarter), "{quarter}");
+        assert_eq!(meter_curve(1.0), 1.0);
+        assert_eq!(meter_curve(0.0), 0.0);
+        assert_eq!(channel_unit(0), 0.0);
+        // 100 / 8192 is about −38 dB, under the floor.
+        assert!(channel_unit(100) < 0.05, "{}", channel_unit(100));
+    }
+
+    fn max_bar(state: &VizState) -> f32 {
+        (0..state.bar_count())
+            .map(|index| state.bar(index))
+            .fold(0.0f32, f32::max)
     }
 }
