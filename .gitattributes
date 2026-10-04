@@ -1,5 +1,7 @@
 # Fixture modules are binary. Git must not treat them as text or rewrite bytes.
 tests/data/*.mod binary
+tests/data/*.xm binary
+tests/data/*.it binary
 
 # Sidecar texts are stored as extracted. The OpenMPT license uses CRLF.
 tests/data/ATTRIBUTION.txt -text

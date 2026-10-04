@@ -72,8 +72,10 @@ use self::theme::{LoadedTheme, ThemeWatch};
 
 /// Everything the terminal loop needs besides the module itself.
 pub struct Session {
-    /// Song to show. An empty module is a new file.
+    /// Song to show. An empty module is a new file, or the placeholder under [`Self::track`].
     pub module: Module,
+    /// XM or IT song. `.mod` leaves this empty.
+    pub track: Option<crate::Song>,
     /// Where Ctrl-S writes. Empty until the user picks a path.
     pub path: PathBuf,
     /// Palette already resolved for this launch.
@@ -120,6 +122,7 @@ pub fn run(session: Session) -> Result<(), Error> {
 
     let Session {
         module,
+        track,
         path,
         theme,
         theme_label,
@@ -135,6 +138,10 @@ pub fn run(session: Session) -> Result<(), Error> {
         state_path,
     } = session;
     let mut app = App::open(module, path);
+    if let Some(song) = track {
+        let path = app.path.clone();
+        app.install_track(song, path);
+    }
     app.set_theme(theme, theme_label);
     app.set_preferences(octave, step, player, max_seconds, default_view);
     if let Some(notice) = notice {
@@ -156,6 +163,9 @@ pub fn run(session: Session) -> Result<(), Error> {
         if app.viz_mode != VizMode::Off {
             let snapshot = audio.visualization();
             app.tick_viz(snapshot.as_ref(), dt);
+            if let Some(peaks) = audio.track_peaks() {
+                app.viz.push_extra_peaks(&peaks, dt);
+            }
         }
         if reload.swap(false, Ordering::Relaxed) || watch.changed() {
             let loaded = theme::resolve(theme_request, color_depth, &home, state.as_deref());
@@ -232,7 +242,12 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
     match outcome {
         Outcome::Play => {
             if app.playing {
-                if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
+                let started = if let Some(song) = &app.track {
+                    audio.start_track(song, app.order_pos, app.row, &app.muted)
+                } else {
+                    audio.start(&app.module, app.order_pos, app.row, &app.muted)
+                };
+                if let Err(err) = started {
                     app.fail_audio(err.to_string());
                 }
             } else if was_playing {
@@ -244,7 +259,12 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
             // when playback stays stopped and no new window is coming.
             audio.clear_visualization();
             if app.playing {
-                if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
+                let started = if let Some(song) = &app.track {
+                    audio.start_track(song, app.order_pos, app.row, &app.muted)
+                } else {
+                    audio.start(&app.module, app.order_pos, app.row, &app.muted)
+                };
+                if let Err(err) = started {
                     app.fail_audio(err.to_string());
                 }
             }

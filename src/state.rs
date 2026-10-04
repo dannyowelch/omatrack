@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::Error;
 use crate::module::{Module, Tag};
+use crate::track::{self, Song};
 
 /// Where [`read`] and [`write`] look when the caller does not pass a path.
 pub fn default_path() -> PathBuf {
@@ -95,8 +96,10 @@ pub fn launch_plan(
 /// The module startup settled on.
 #[derive(Debug)]
 pub struct Launched {
-    /// Song to show.
+    /// Song to show. Empty when [`Self::track`] is set.
     pub module: Module,
+    /// XM or IT song. `.mod` leaves this empty.
+    pub track: Option<Song>,
     /// Empty when the song is untitled.
     pub path: PathBuf,
     /// Shown once, in the error color. Set when a reopen failed.
@@ -108,24 +111,12 @@ pub struct Launched {
 /// Load `plan`. A bad remembered file does not return [`Err`].
 pub fn launch(plan: LaunchPlan) -> Result<Launched, Error> {
     match plan {
-        LaunchPlan::File(path) => {
-            let module = Module::load(&path)?;
-            Ok(Launched {
-                module,
-                path: path.clone(),
-                notice: None,
-                remember: Some(path),
-            })
-        }
-        LaunchPlan::Reopen(path) => match Module::load(&path) {
-            Ok(module) => Ok(Launched {
-                module,
-                path: path.clone(),
-                notice: None,
-                remember: Some(path),
-            }),
+        LaunchPlan::File(path) => load_launched(&path),
+        LaunchPlan::Reopen(path) => match load_launched(&path) {
+            Ok(launched) => Ok(launched),
             Err(err) => Ok(Launched {
                 module: Module::new(Tag::Mk),
+                track: None,
                 path: PathBuf::new(),
                 notice: Some(reopen_notice(&path, &err)),
                 remember: None,
@@ -133,9 +124,29 @@ pub fn launch(plan: LaunchPlan) -> Result<Launched, Error> {
         },
         LaunchPlan::Empty => Ok(Launched {
             module: Module::new(Tag::Mk),
+            track: None,
             path: PathBuf::new(),
             notice: None,
             remember: None,
+        }),
+    }
+}
+
+fn load_launched(path: &Path) -> Result<Launched, Error> {
+    match track::open_path(path)? {
+        track::Opened::Mod(module) => Ok(Launched {
+            module,
+            track: None,
+            path: path.to_path_buf(),
+            notice: None,
+            remember: Some(path.to_path_buf()),
+        }),
+        track::Opened::Track(song) => Ok(Launched {
+            module: Module::new(Tag::Mk),
+            track: Some(song),
+            path: path.to_path_buf(),
+            notice: None,
+            remember: Some(path.to_path_buf()),
         }),
     }
 }

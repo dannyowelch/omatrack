@@ -91,6 +91,10 @@ pub enum Error {
     Wav(String),
     /// A sample edit was rejected (range, volume, finetune, loop, or slot).
     SampleEdit(String),
+    /// The file's magic matched a supported tracker, but a field is illegal.
+    Malformed(String),
+    /// The tracker was recognized, but this file uses a feature that is not played yet.
+    Unsupported(String),
 }
 
 impl Error {
@@ -164,6 +168,8 @@ impl fmt::Display for Error {
             Self::Audio(message) | Self::Wav(message) | Self::SampleEdit(message) => {
                 write!(f, "{message}")
             }
+            Self::Malformed(message) => write!(f, "{message}"),
+            Self::Unsupported(message) => write!(f, "{message}"),
         }
     }
 }

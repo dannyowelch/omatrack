@@ -2,7 +2,7 @@
 
 Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
 
-It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. The spectrum is up at launch. F5 cycles that view, then a full-screen scope, then off.
+It loads a 4-channel `.mod`, shows it, plays it, and edits it. It also loads and plays FastTracker 2 `.xm` and Impulse Tracker `.it` files (detected by header, not just by extension). Those songs are read-only: the pattern editor will not change them, and saving them is not supported yet, so the original file is left untouched. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. The spectrum is up at launch. F5 cycles that view, then a full-screen scope, then off.
 
 Colors follow the active Omarchy theme when one is installed. Otherwise the screen is the built-in ProTracker blue. `--theme` can force either of those, a green phosphor palette, or plain ANSI colors that track the terminal's own theme.
 
@@ -49,6 +49,8 @@ cargo build --release --locked
 ```bash
 cargo build --release
 cargo run -- path/to/song.mod
+cargo run -- path/to/song.xm
+cargo run -- path/to/song.it
 cargo run --                 # reopen the last module, or start empty
 ```
 
@@ -265,6 +267,18 @@ cargo test --all-targets --all-features
 
 GitHub Actions runs those three on Rust 1.83, after installing the ALSA headers cpal needs to build.
 
+## FastTracker 2 and Impulse Tracker
+
+`.xm` is recognized by the `Extended Module: ` magic. `.it` is recognized by `IMPM`. Ctrl-F's file list also shows `.xm` and `.it`. Reopening the last file works for both.
+
+Playback covers the usual song: more than four channels (XM up to 32, IT up to 64), real panning from the file, 8-bit and 16-bit samples, forward and ping-pong loops, XM volume and panning envelopes, auto-vibrato, linear and Amiga frequency tables, and the standard XM effect set (arpeggio, slides, tone portamento, vibrato, tremolo, volume-column effects, pattern break and jump, speed and tempo, retrigger, note cut and delay). IT playback covers instruments or sample mode, basic NNA and duplicate-check actions, volume, pan, and pitch envelopes, sustain loops, linear and Amiga slides, and the common effects (`A` speed, `B` jump, `C` break, `D` volume slide, `E`/`F` portamento, `G` tone portamento, `H` vibrato, `J` arpeggio, `K`/`L`, `O` offset, `Q` retrigger, `S` extended, `T` tempo, `V` global volume, `X` panning, and the related column commands). IT214 and IT215 compressed samples are decompressed. A stereo compressed sample is refused with an error instead of being played as noise.
+
+The pattern view scrolls sideways when the song has more channels than the screen. Cells are compact (`C-401--C00` style, with the volume column). The spectrum panel does not grow. A `.mod` still shows the four channel meters. An XM or IT song draws up to eight meters, two per row, scrolled with the pattern cursor. The scope still draws four shapes from the first four channels.
+
+Editing and saving stay `.mod` only. Enter on an XM or IT song says the song is read-only. Ctrl-S and Save As do not overwrite the file. There is no Save As `.mod`: a conversion would drop extra channels, instruments, and envelopes. Ctrl-G and `--render` still write a WAV.
+
+Not implemented, on purpose: IT resonant filters, stereo IT214 samples, MIDI macros (`Zxx`), and bit-exact FastTracker 2 / Impulse Tracker output. Envelopes, auto-vibrato, and slides follow the published period formulas and the usual tick rules; a few tracker-specific quirks (exact FT2 vibrato tables, old-IT effect compatibility, filter envelopes) are approximated or skipped. The song stays in time when an effect is skipped.
+
 ## What `.mod` files are supported
 
 31-sample, 4-channel ProTracker modules:
@@ -300,6 +314,7 @@ src/convert.rs    WAV PCM to signed 8-bit mono
 src/sample_edit.rs volume, loop, trim, fades, copy
 src/waveform.rs   block waveform for the sample list
 src/player/       tick clock, effects, four-channel mixer
+src/track/        XM and IT loaders and their replayer
 src/viz/          FFT, meters, lock-free mix window, braille scope
 src/audio.rs      cpal output and note/sample preview
 src/wav.rs        WAV reader, 16-bit stereo writer, 8-bit mono writer
@@ -326,4 +341,4 @@ Ctrl-S writes the module with the same writer the round-trip tests use.
 
 Omatrack is MIT or Apache-2.0, at your option. See `LICENSE-MIT` and `LICENSE-APACHE`.
 
-The modules in `tests/data/` are fixtures and are not under those licenses. Each one keeps the license named in `tests/data/ATTRIBUTION.txt` (CC0, public domain, CC BY 4.0, and BSD-3-Clause). Do not commit copyrighted `.mod` files.
+The modules in `tests/data/` are fixtures and are not under those licenses. Each one keeps the license named in `tests/data/ATTRIBUTION.txt` (CC0, public domain, CC BY 4.0, and BSD-3-Clause), including the XM and IT fixtures. Do not commit copyrighted module files.

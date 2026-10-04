@@ -402,8 +402,12 @@ pub struct App {
     pub(crate) speed: u8,
     /// CIA tempo, from the replayer.
     pub(crate) tempo: u8,
-    /// Per-channel mute. Index 0 is channel 1.
-    pub(crate) muted: [bool; CHANNELS],
+    /// Per-channel mute. Index 0 is channel 1. Length follows the open song.
+    pub(crate) muted: Vec<bool>,
+    /// XM or IT song. `.mod` leaves this empty and uses [`Self::module`].
+    pub(crate) track: Option<crate::Song>,
+    /// First pattern channel drawn when the song has more columns than the screen.
+    pub(crate) channel_scroll: usize,
     /// Last failure from opening the audio device, shown in the transport bar.
     pub(crate) audio_error: Option<String>,
     pub(crate) message: Option<String>,
@@ -461,7 +465,9 @@ impl App {
             playing: false,
             speed: DEFAULT_SPEED,
             tempo: DEFAULT_TEMPO,
-            muted: [false; CHANNELS],
+            muted: vec![false; CHANNELS],
+            track: None,
+            channel_scroll: 0,
             audio_error: None,
             message: None,
             message_error: false,
@@ -499,6 +505,19 @@ impl App {
     /// Snap the view to the row the replayer is mixing.
     pub(crate) fn follow(&mut self, order: usize, row: usize, speed: u8, tempo: u8) {
         self.set_clock(speed, tempo);
+        if let Some(song) = &self.track {
+            let len = song.order_len().max(1);
+            self.order_pos = order.min(len - 1);
+            if let Some(pattern) = song.order_pattern(self.order_pos) {
+                if pattern != self.view_pattern {
+                    self.selection = None;
+                    self.view_pattern = pattern;
+                }
+            }
+            let rows = song.row_count(self.view_pattern).max(1);
+            self.row = row.min(rows - 1);
+            return;
+        }
         let len = self.song_len();
         self.order_pos = order.min(len.saturating_sub(1));
         let pattern = usize::from(self.module.order[self.order_pos]);
@@ -579,7 +598,12 @@ impl App {
     }
 
     /// Write the module to the path it was opened from.
+    ///
+    /// XM and IT are not written. The original file is left untouched.
     pub fn save(&mut self) -> Result<(), String> {
+        if self.track.is_some() {
+            return Err(crate::track::SAVE_UNSUPPORTED.to_string());
+        }
         if self.path.as_os_str().is_empty() {
             return Err("there is no file to save".to_string());
         }
@@ -588,6 +612,52 @@ impl App {
             .map_err(|err| err.to_string())?;
         self.editor.mark_saved();
         Ok(())
+    }
+
+    /// Pattern channels in the open song.
+    pub(crate) fn channel_count(&self) -> usize {
+        self.track
+            .as_ref()
+            .map(|song| song.channel_count())
+            .unwrap_or(CHANNELS)
+    }
+
+    /// Rows in the pattern on screen.
+    pub(crate) fn row_count(&self) -> usize {
+        if let Some(song) = &self.track {
+            song.row_count(self.view_pattern).max(1)
+        } else {
+            ROWS
+        }
+    }
+
+    /// Sample slots listed in the sample pane.
+    pub(crate) fn sample_total(&self) -> usize {
+        if let Some(song) = &self.track {
+            song.samples.len().max(1)
+        } else {
+            SAMPLE_COUNT
+        }
+    }
+
+    /// XM and IT stay read-only. `.mod` does not.
+    pub(crate) fn is_readonly(&self) -> bool {
+        self.track.is_some()
+    }
+
+    /// Keep the cursor's channel inside the drawn window.
+    pub(crate) fn reveal_channel(&mut self, visible: usize) {
+        let visible = visible.max(1);
+        let count = self.channel_count();
+        if self.channel < self.channel_scroll {
+            self.channel_scroll = self.channel;
+        } else if self.channel >= self.channel_scroll.saturating_add(visible) {
+            self.channel_scroll = self.channel + 1 - visible;
+        }
+        let max_scroll = count.saturating_sub(visible);
+        if self.channel_scroll > max_scroll {
+            self.channel_scroll = max_scroll;
+        }
     }
 
     /// Apply one command. Movement past either end sticks.
@@ -643,6 +713,13 @@ impl App {
                 }
             }
             Command::ToggleEdit => {
+                if self.is_readonly() {
+                    self.editing = false;
+                    self.set_error(
+                        "XM and IT songs are read-only. Pattern editing is not supported yet.",
+                    );
+                    return Outcome::None;
+                }
                 self.editing = !self.editing;
                 if self.editing {
                     self.focus = Focus::Pattern;
@@ -691,18 +768,32 @@ impl App {
 
     /// Keep the cursors inside the rows the panes can show.
     pub(crate) fn reconcile_scroll(&mut self, pattern_window: usize, sample_window: usize) {
-        self.row_offset = window_start(self.row_offset, self.row, ROWS, pattern_window);
-        self.sample_offset =
-            window_start(self.sample_offset, self.sample, SAMPLE_COUNT, sample_window);
+        self.row_offset = window_start(self.row_offset, self.row, self.row_count(), pattern_window);
+        self.sample_offset = window_start(
+            self.sample_offset,
+            self.sample,
+            self.sample_total(),
+            sample_window,
+        );
     }
 
     /// Played order length, at least 1 so the cursor always has a slot.
     pub(crate) fn song_len(&self) -> usize {
+        if let Some(song) = &self.track {
+            return song.order_len().max(1);
+        }
         usize::from(self.module.song_length).clamp(1, ORDER_LEN)
     }
 
     /// Pattern number stored at the current order position.
     pub(crate) fn order_pattern(&self) -> u8 {
+        if let Some(song) = &self.track {
+            return song
+                .orders
+                .get(self.order_pos.min(song.order_len().saturating_sub(1)))
+                .copied()
+                .unwrap_or(0);
+        }
         let last = self.song_len().saturating_sub(1);
         self.module.order[self.order_pos.min(last)]
     }
@@ -770,6 +861,7 @@ impl App {
 
     /// Replace the song with an empty module and stop playback.
     pub(crate) fn install_blank(&mut self) -> Outcome {
+        self.track = None;
         self.module = Module::new(crate::module::Tag::Mk);
         self.path.clear();
         self.editor = Editor::new();
@@ -784,6 +876,7 @@ impl App {
             .and_then(|name| name.to_str())
             .unwrap_or("module");
         let message = format!("Opened {name}");
+        self.track = None;
         self.module = module;
         self.path = path;
         self.editor = Editor::new();
@@ -807,12 +900,21 @@ impl App {
         self.order_pos = 0;
         self.row = 0;
         self.row_offset = 0;
-        let pattern = usize::from(self.module.order[0]);
-        if pattern < self.module.patterns.len() {
-            self.retarget_pattern(pattern);
+        self.channel_scroll = 0;
+        if self.track.is_some() {
+            self.retarget_from_order();
+            if let Some(song) = &self.track {
+                self.speed = song.initial_speed.max(1);
+                self.tempo = song.initial_tempo.max(1);
+            }
+        } else {
+            let pattern = usize::from(self.module.order[0]);
+            if pattern < self.module.patterns.len() {
+                self.retarget_pattern(pattern);
+            }
+            self.speed = DEFAULT_SPEED;
+            self.tempo = DEFAULT_TEMPO;
         }
-        self.speed = DEFAULT_SPEED;
-        self.tempo = DEFAULT_TEMPO;
         self.viz = VizState::new();
         if self.playing {
             self.audio_error = None;
@@ -840,9 +942,46 @@ impl App {
         self.overlay = Overlay::None;
         self.audio_error = None;
         self.notice = None;
-        self.speed = DEFAULT_SPEED;
-        self.tempo = DEFAULT_TEMPO;
-        self.muted = [false; CHANNELS];
+        if let Some(song) = &self.track {
+            self.view_pattern = song.order_pattern(0).unwrap_or(0);
+            self.speed = song.initial_speed.max(1);
+            self.tempo = song.initial_tempo.max(1);
+        } else {
+            self.speed = DEFAULT_SPEED;
+            self.tempo = DEFAULT_TEMPO;
+        }
+        let channels = self.channel_count();
+        self.muted = vec![false; channels];
+        if let Some(song) = &self.track {
+            for (index, mute) in song.initial_mute.iter().enumerate() {
+                if let Some(slot) = self.muted.get_mut(index) {
+                    *slot = *mute;
+                }
+            }
+        }
+        self.channel_scroll = 0;
+        self.channel = self.channel.min(channels.saturating_sub(1));
+        self.row = self.row.min(self.row_count().saturating_sub(1));
+    }
+
+    /// Replace the song with an XM or IT module. Editing stays off.
+    pub(crate) fn install_track(&mut self, song: crate::Song, path: PathBuf) -> Outcome {
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module");
+        let channels = song.channels;
+        let label = song.format.label();
+        let message = format!("Opened {name} ({channels} channels, {label})");
+        self.track = Some(song);
+        self.module = Module::new(crate::module::Tag::Mk);
+        self.path = path;
+        self.editor = Editor::new();
+        self.clipboard = Clipboard::default();
+        self.finish_replaced(&message);
+        self.notice =
+            Some("XM and IT are read-only. Saving this format is not supported yet.".to_string());
+        Outcome::DocumentReplaced
     }
 
     fn ask_quit(&mut self) -> Outcome {
@@ -858,11 +997,11 @@ impl App {
     fn apply_motion(&mut self, command: Command) {
         match command {
             Command::MoveRow(delta) => {
-                self.row = step(self.row, delta, ROWS);
+                self.row = step(self.row, delta, self.row_count());
                 self.nudge_selection();
             }
             Command::MoveChannel(delta) => {
-                self.channel = step(self.channel, delta, CHANNELS);
+                self.channel = step(self.channel, delta, self.channel_count());
                 self.nudge_selection();
             }
             Command::MoveField(delta) => {
@@ -876,45 +1015,57 @@ impl App {
                 self.nudge_selection();
             }
             Command::LastRow => {
-                self.row = ROWS - 1;
+                self.row = self.row_count().saturating_sub(1);
                 self.nudge_selection();
             }
             Command::NextChannel => {
-                self.channel = (self.channel + 1) % CHANNELS;
+                let count = self.channel_count();
+                self.channel = (self.channel + 1) % count;
                 self.nudge_selection();
             }
             Command::PrevChannel => {
-                self.channel = (self.channel + CHANNELS - 1) % CHANNELS;
+                let count = self.channel_count();
+                self.channel = (self.channel + count - 1) % count;
                 self.nudge_selection();
             }
             Command::MoveOrder(delta) => {
                 let len = self.song_len();
                 self.order_pos = step(self.order_pos, delta, len);
-                self.retarget_pattern(usize::from(self.module.order[self.order_pos]));
+                self.retarget_from_order();
             }
             Command::MovePattern(delta) => {
-                let len = self.module.patterns.len().max(1);
+                let len = if let Some(song) = &self.track {
+                    song.patterns.len().max(1)
+                } else {
+                    self.module.patterns.len().max(1)
+                };
                 let next = step(self.view_pattern, delta, len);
                 self.retarget_pattern(next);
             }
             Command::NextFocus => self.focus = cycle(self.focus, true),
             Command::PrevFocus => self.focus = cycle(self.focus, false),
-            Command::MoveSample(delta) => self.sample = step(self.sample, delta, SAMPLE_COUNT),
+            Command::MoveSample(delta) => {
+                self.sample = step(self.sample, delta, self.sample_total())
+            }
             Command::FirstSample => self.sample = 0,
-            Command::LastSample => self.sample = SAMPLE_COUNT - 1,
+            Command::LastSample => self.sample = self.sample_total().saturating_sub(1),
             Command::FirstOrder => {
                 self.order_pos = 0;
-                self.retarget_pattern(usize::from(self.module.order[0]));
+                self.retarget_from_order();
             }
             Command::LastOrder => {
                 self.order_pos = self.song_len().saturating_sub(1);
-                self.retarget_pattern(usize::from(self.module.order[self.order_pos]));
+                self.retarget_from_order();
             }
             _ => {}
         }
     }
 
     fn apply_change(&mut self, command: Command) -> Outcome {
+        if self.is_readonly() {
+            self.set_error("XM and IT songs are read-only. Pattern editing is not supported yet.");
+            return Outcome::None;
+        }
         let before = self.editor.undo_len();
         match command {
             Command::EnterNote(semitone) => self.enter_note(semitone),
@@ -1246,8 +1397,25 @@ impl App {
         }
     }
 
+    fn retarget_from_order(&mut self) {
+        if let Some(song) = &self.track {
+            if let Some(pattern) = song.order_pattern(self.order_pos) {
+                self.retarget_pattern(pattern);
+            }
+            self.row = self.row.min(self.row_count().saturating_sub(1));
+            return;
+        }
+        self.retarget_pattern(usize::from(
+            self.module.order[self.order_pos.min(ORDER_LEN - 1)],
+        ));
+    }
+
     fn sync_view_to_order(&mut self) {
         self.clamp_position();
+        if self.track.is_some() {
+            self.retarget_from_order();
+            return;
+        }
         let pattern = usize::from(self.module.order[self.order_pos]);
         if pattern < self.module.patterns.len() {
             self.retarget_pattern(pattern);
@@ -1259,13 +1427,18 @@ impl App {
         if self.order_pos >= len {
             self.order_pos = len.saturating_sub(1);
         }
-        if self.module.patterns.is_empty() {
+        let patterns = if let Some(song) = &self.track {
+            song.patterns.len()
+        } else {
+            self.module.patterns.len()
+        };
+        if patterns == 0 {
             self.view_pattern = 0;
             return;
         }
-        if self.view_pattern >= self.module.patterns.len() {
+        if self.view_pattern >= patterns {
             self.selection = None;
-            self.view_pattern = self.module.patterns.len() - 1;
+            self.view_pattern = patterns - 1;
         }
     }
 }

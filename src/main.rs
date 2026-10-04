@@ -74,11 +74,19 @@ fn run() -> Result<(), MainError> {
                 usage()
             )));
         };
-        let module = Module::load(&path).map_err(|err| MainError::Failed(annotate(&path, err)))?;
+        let opened =
+            omatrack::open_path(&path).map_err(|err| MainError::Failed(annotate(&path, err)))?;
         let _ = state::write(&state_path, &path);
         let player = merge_player(settings.audio, &render);
         let max_seconds = render.max_seconds.unwrap_or(settings.max_seconds);
-        render_song(&module, &render.wav, player, max_seconds)?;
+        match opened {
+            omatrack::Opened::Mod(module) => {
+                render_song(&module, &render.wav, player, max_seconds)?;
+            }
+            omatrack::Opened::Track(song) => {
+                render_track(&song, &render.wav, player, max_seconds)?;
+            }
+        }
         return Ok(());
     }
 
@@ -100,6 +108,7 @@ fn run() -> Result<(), MainError> {
         let _ = state::write(&state_path, path);
     }
     let module = launched.module;
+    let track = launched.track;
     let path = launched.path;
     let depth = tui::detect_color_depth();
     let home = config::home_dir();
@@ -117,6 +126,7 @@ fn run() -> Result<(), MainError> {
     }
     let session = Session {
         module,
+        track,
         path,
         theme: loaded_theme.theme,
         theme_label: loaded_theme.label,
@@ -150,6 +160,34 @@ fn merge_player(mut player: PlayerConfig, render: &RenderOptions) -> PlayerConfi
         player.stereo_separation = separation;
     }
     player
+}
+
+fn render_track(
+    song: &omatrack::Song,
+    wav: &Path,
+    config: PlayerConfig,
+    max_seconds: f64,
+) -> Result<(), MainError> {
+    let max_frames = (max_seconds * f64::from(config.sample_rate))
+        .round()
+        .clamp(1.0, u32::MAX as f64) as usize;
+    let stats = omatrack::track::render_to_wav(song, wav, config, max_frames)
+        .map_err(|err| MainError::Failed(annotate(wav, err)))?;
+    let seconds = stats.frames as f64 / f64::from(stats.sample_rate);
+    let why = if stats.halted {
+        "halted"
+    } else if stats.looped {
+        "stopped at the song loop"
+    } else {
+        "stopped at the time limit"
+    };
+    eprintln!(
+        "wrote {} ({seconds:.2}s, {} Hz, {} frames, {why})",
+        wav.display(),
+        stats.sample_rate,
+        stats.frames
+    );
+    Ok(())
 }
 
 fn render_song(
@@ -331,8 +369,8 @@ fn annotate(path: &Path, err: Error) -> String {
 
 fn usage() -> String {
     "\
-usage: omatrack [options] [file.mod]
-       omatrack --render <out.wav> [options] <file.mod>
+usage: omatrack [options] [file.mod|file.xm|file.it]
+       omatrack --render <out.wav> [options] <file>
        omatrack --help
        omatrack --version
 "
@@ -344,8 +382,8 @@ fn help() -> String {
 Omatrack — ProTracker module viewer and player
 
 Usage:
-    omatrack [options] [file.mod]
-    omatrack --render <out.wav> [options] <file.mod>
+    omatrack [options] [file.mod|file.xm|file.it]
+    omatrack --render <out.wav> [options] <file>
     omatrack --help
     omatrack --version
 
@@ -355,9 +393,12 @@ empty module and says why. Ctrl-F opens the file menu (new, open, save,
 save as). A * after the title means unsaved edits; quit, new, and open ask
 before discarding them.
 
-Opens a 31-sample, 4-channel .mod file (M.K., M!K!, FLT4, or 4CHN).
+Opens a 31-sample, 4-channel .mod file (M.K., M!K!, FLT4, or 4CHN),
+or a FastTracker 2 .xm / Impulse Tracker .it file (detected by header).
+XM and IT are played and shown, and are read-only: editing and saving
+those formats is not supported, and the original file is not overwritten.
 The terminal needs about 76×20. Space plays from the cursor. Enter
-toggles edit mode. Ctrl-S writes the file, or asks for a path when the
+toggles edit mode. Ctrl-S writes a .mod, or asks for a path when the
 module is untitled. ? lists every key. If no audio device is available
 the error stays on the transport bar.
 
