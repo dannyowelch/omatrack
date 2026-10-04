@@ -38,12 +38,15 @@ impl Ballistics {
 
     /// Spectrum bars. Attack is a frame or two. Release is a fraction of a
     /// second, in real time. The cap holds, then drops at a constant rate.
+    ///
+    /// `peak_decay` is the time to fall from full scale to silence, chosen so
+    /// the mark moves about 1.75 rows per second on the four-row panel.
     pub const fn spectrum() -> Self {
         Self {
             attack: 0.020,
             decay: 0.40,
             hold: 0.80,
-            peak_decay: 1.70,
+            peak_decay: 4.0 / 1.75,
             linear_peak: true,
         }
     }
@@ -78,44 +81,133 @@ impl Meter {
     /// rate; an exponential one eases toward `input`. Time spent inside the
     /// hold does not also count as fall time.
     pub fn update(&mut self, input: f32, dt: f32, ballistics: Ballistics) {
-        let input = if input.is_finite() {
-            input.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        let dt = if dt.is_finite() { dt.max(0.0) } else { 0.0 };
+        let input = sanitize_unit(input);
+        let dt = sanitize_dt(dt);
         let tau = if input > self.level {
             ballistics.attack
         } else {
             ballistics.decay
         };
         self.level = approach(self.level, input, dt, tau);
-        let fall_dt = if input >= self.peak {
-            self.peak = input;
-            self.hold_left = ballistics.hold.max(0.0);
-            0.0
-        } else if self.hold_left > dt {
-            self.hold_left -= dt;
-            0.0
-        } else {
-            let fall = dt - self.hold_left;
-            self.hold_left = 0.0;
-            fall
-        };
-        if fall_dt > 0.0 {
-            if ballistics.linear_peak {
-                let seconds = if ballistics.peak_decay.is_finite() {
-                    ballistics.peak_decay.max(1.0e-3)
-                } else {
-                    1.0e-3
-                };
-                self.peak = (self.peak - fall_dt / seconds).max(input);
-            } else {
-                self.peak = approach(self.peak, input, fall_dt, ballistics.peak_decay);
-            }
-        }
+        advance_peak(&mut self.peak, &mut self.hold_left, input, dt, ballistics);
         if self.peak < self.level {
             self.peak = self.level;
+        }
+    }
+
+    /// Slide the held mark by `shift` display units.
+    ///
+    /// Automatic gain moves the whole scale. Adding the same shift the new
+    /// gain applied keeps a held mark attached to the magnitude that set it,
+    /// instead of treating the louder scale as a new transient. The hold
+    /// clock is left alone.
+    pub(crate) fn rescale_peak(&mut self, shift: f32) {
+        if !shift.is_finite() || self.peak <= 0.0 {
+            return;
+        }
+        self.peak = (self.peak + shift).clamp(0.0, 1.0);
+    }
+}
+
+/// One column's peak-hold mark, in the same `0..=1` display units as the bar.
+///
+/// The value is independent of every other column. Smoothing belongs on the
+/// levels that are fed in, not on these marks.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeakMark {
+    /// Held height, `0..=1`.
+    pub value: f32,
+    hold_left: f32,
+}
+
+impl Default for PeakMark {
+    fn default() -> Self {
+        Self {
+            value: 0.0,
+            hold_left: 0.0,
+        }
+    }
+}
+
+impl PeakMark {
+    /// Advance by `dt` seconds toward `input`.
+    ///
+    /// A higher input snaps the mark and restarts the hold. Otherwise the
+    /// hold runs out, then a linear spectrum mark falls at a constant rate
+    /// and never passes below `input`.
+    pub fn update(&mut self, input: f32, dt: f32, ballistics: Ballistics) {
+        advance_peak(
+            &mut self.value,
+            &mut self.hold_left,
+            sanitize_unit(input),
+            sanitize_dt(dt),
+            ballistics,
+        );
+    }
+
+    /// Move the mark with a gain change. See [`Meter::rescale_peak`].
+    pub fn rescale(&mut self, shift: f32) {
+        if !shift.is_finite() || self.value <= 0.0 {
+            return;
+        }
+        self.value = (self.value + shift).clamp(0.0, 1.0);
+    }
+}
+
+/// Advance each mark toward its own `levels` entry.
+///
+/// `levels[i]` is the only input mark `i` sees. A short `levels` slice leaves
+/// the extra marks untouched. Non-finite levels count as silence.
+pub fn advance_column_peaks(marks: &mut [PeakMark], levels: &[f32], dt: f32) {
+    let ballistics = Ballistics::spectrum();
+    for (mark, level) in marks.iter_mut().zip(levels) {
+        let level = sanitize_unit(*level);
+        mark.update(level, dt, ballistics);
+        if mark.value < level {
+            mark.value = level;
+        }
+    }
+}
+
+fn sanitize_unit(value: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
+fn sanitize_dt(dt: f32) -> f32 {
+    if dt.is_finite() {
+        dt.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn advance_peak(peak: &mut f32, hold_left: &mut f32, input: f32, dt: f32, ballistics: Ballistics) {
+    let fall_dt = if input >= *peak {
+        *peak = input;
+        *hold_left = ballistics.hold.max(0.0);
+        0.0
+    } else if *hold_left > dt {
+        *hold_left -= dt;
+        0.0
+    } else {
+        let fall = dt - *hold_left;
+        *hold_left = 0.0;
+        fall
+    };
+    if fall_dt > 0.0 {
+        if ballistics.linear_peak {
+            let seconds = if ballistics.peak_decay.is_finite() {
+                ballistics.peak_decay.max(1.0e-3)
+            } else {
+                1.0e-3
+            };
+            *peak = (*peak - fall_dt / seconds).max(input);
+        } else {
+            *peak = approach(*peak, input, fall_dt, ballistics.peak_decay);
         }
     }
 }
@@ -168,13 +260,16 @@ pub(crate) fn blend_neighbors(levels: &[f32]) -> Vec<f32> {
 ///
 /// `inputs` are display levels in `0..=1`, one per bar, already on the dB
 /// curve. Neighbors are blended first, then each bar uses [`Ballistics::spectrum`].
-/// Extra meters, past the end of `inputs`, are left alone.
-pub fn smooth_spectrum(meters: &mut [Meter], inputs: &[f32], dt: f32) {
+/// The blend is returned so a caller can track peaks from these bar values
+/// without blending the peaks a second time. Extra meters, past the end of
+/// `inputs`, are left alone.
+pub fn smooth_spectrum(meters: &mut [Meter], inputs: &[f32], dt: f32) -> Vec<f32> {
     let blended = blend_neighbors(inputs);
     let ballistics = Ballistics::spectrum();
     for (meter, input) in meters.iter_mut().zip(&blended) {
         meter.update(*input, dt, ballistics);
     }
+    blended
 }
 
 pub(super) fn approach(current: f32, target: f32, dt: f32, tau: f32) -> f32 {
@@ -338,6 +433,105 @@ mod tests {
             "cap never released: {}",
             meters[2].peak
         );
+    }
+
+    #[test]
+    fn column_peaks_stay_independent_hold_and_then_fall() {
+        let ballistics = Ballistics::spectrum();
+        let mut marks = vec![PeakMark::default(); 5];
+        // A spike in the middle column must not raise its neighbors.
+        advance_column_peaks(&mut marks, &[0.15, 0.20, 1.0, 0.10, 0.05], 0.05);
+        assert!(
+            (marks[2].value - 1.0).abs() < 1.0e-3,
+            "spike column {}",
+            marks[2].value
+        );
+        assert!(
+            (marks[0].value - 0.15).abs() < 1.0e-3,
+            "left edge borrowed the spike: {}",
+            marks[0].value
+        );
+        assert!(
+            (marks[1].value - 0.20).abs() < 1.0e-3,
+            "neighbor borrowed the spike: {}",
+            marks[1].value
+        );
+        assert!((marks[3].value - 0.10).abs() < 1.0e-3, "{}", marks[3].value);
+        assert!((marks[4].value - 0.05).abs() < 1.0e-3, "{}", marks[4].value);
+
+        let floor = [0.15, 0.20, 0.0, 0.10, 0.05];
+        let mut elapsed = 0.0f32;
+        while elapsed + 1.0e-4 < ballistics.hold {
+            advance_column_peaks(&mut marks, &floor, 0.10);
+            elapsed += 0.10;
+            assert!(
+                (marks[2].value - 1.0).abs() < 1.0e-3,
+                "fell during the hold at {elapsed}s: {}",
+                marks[2].value
+            );
+            assert!((marks[1].value - 0.20).abs() < 1.0e-3);
+        }
+        // The frame that lands on the hold boundary does not also fall.
+        let rest = ballistics.hold - elapsed;
+        advance_column_peaks(&mut marks, &floor, rest);
+        assert!(
+            (marks[2].value - 1.0).abs() < 1.0e-3,
+            "boundary frame dropped the cap to {}",
+            marks[2].value
+        );
+
+        let mut previous = marks[2].value;
+        advance_column_peaks(&mut marks, &floor, 0.50);
+        let expected = 0.50 / ballistics.peak_decay;
+        let dropped = previous - marks[2].value;
+        assert!(
+            (dropped - expected).abs() < 0.02,
+            "dropped {dropped}, expected {expected} (about 1.75 rows/sec on 4 rows)"
+        );
+        assert!(marks[2].value < previous);
+        assert!(marks[2].value + 1.0e-4 >= floor[2]);
+        previous = marks[2].value;
+        advance_column_peaks(&mut marks, &floor, 0.50);
+        assert!(
+            marks[2].value <= previous + 1.0e-4,
+            "fall reversed: {previous} -> {}",
+            marks[2].value
+        );
+        assert!(marks[2].value + 1.0e-4 >= floor[2]);
+        // Neighbors that were never spiked stay on their own floor.
+        assert!((marks[1].value - 0.20).abs() < 1.0e-3);
+        assert!((marks[3].value - 0.10).abs() < 1.0e-3);
+    }
+
+    #[test]
+    fn a_gain_shift_does_not_turn_a_quieter_frame_into_a_new_peak() {
+        let ballistics = Ballistics::spectrum();
+        let mut mark = PeakMark::default();
+        mark.update(0.70, 0.0, ballistics);
+        // +0.10 display units of gain. The new frame is louder on screen
+        // (0.75) but quieter than the magnitude the mark is holding (0.80).
+        mark.rescale(0.10);
+        assert!((mark.value - 0.80).abs() < 1.0e-4);
+        mark.update(0.75, 0.05, ballistics);
+        assert!(
+            (mark.value - 0.80).abs() < 1.0e-3,
+            "gain shift was taken as a new high: {}",
+            mark.value
+        );
+        let mut elapsed = 0.05f32;
+        while elapsed + 0.10 < ballistics.hold {
+            mark.update(0.75, 0.10, ballistics);
+            elapsed += 0.10;
+            assert!(
+                (mark.value - 0.80).abs() < 1.0e-3,
+                "fell early at {elapsed}: {}",
+                mark.value
+            );
+            assert!(mark.value + 1.0e-4 >= 0.75);
+        }
+        mark.update(0.75, ballistics.hold - elapsed + 0.40, ballistics);
+        assert!(mark.value < 0.78, "cap never left the hold: {}", mark.value);
+        assert!(mark.value + 1.0e-4 >= 0.75);
     }
 
     #[test]
