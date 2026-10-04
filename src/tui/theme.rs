@@ -169,8 +169,12 @@ impl Theme {
     /// `bright_foreground`, which is what Omarchy's terminal templates use.
     /// Edit mode uses the accent so it stays distinct from that cursor.
     /// The playback row mixes the background toward green. Channel headers
-    /// take red, yellow, green, and blue. The waveform and the spectrum use
-    /// cyan, the spectrum peak uses yellow, and errors use red.
+    /// take red, yellow, green, and blue. The waveform uses cyan. Spectrum
+    /// bars use cyan when that color is chromatic and distinct from both the
+    /// background and the foreground; a gray cyan (Matte Black stores the
+    /// foreground in `color6`) falls through to blue, green, magenta, the
+    /// accent, yellow, then red. Peak marks prefer yellow when it still
+    /// contrasts with the bar. Errors use red.
     pub fn from_palette(palette: &Palette) -> Self {
         let background = pick(palette, &["background", "color0"], Rgb { r: 0, g: 0, b: 0 });
         let text = pick(
@@ -196,6 +200,42 @@ impl Theme {
             &["lighter_background", "selection", "color8"],
             omarchy::mix(background, text, 0.12),
         );
+        let spectrum = spectrum_color(
+            palette,
+            &[
+                "cyan",
+                "bright_cyan",
+                "blue",
+                "bright_blue",
+                "green",
+                "bright_green",
+                "magenta",
+                "bright_magenta",
+                "accent",
+                "yellow",
+                "red",
+            ],
+            background,
+            text,
+            None,
+        );
+        let spectrum_peak = spectrum_color(
+            palette,
+            &[
+                "yellow",
+                "bright_yellow",
+                "red",
+                "bright_red",
+                "green",
+                "magenta",
+                "accent",
+                "cyan",
+                "blue",
+            ],
+            background,
+            text,
+            Some(spectrum),
+        );
         let rgb = color_rgb;
         Self {
             id: "omarchy",
@@ -218,8 +258,8 @@ impl Theme {
             border_focus: rgb(accent),
             channels: [rgb(red), rgb(yellow), rgb(green), rgb(blue)],
             waveform: rgb(cyan),
-            spectrum: rgb(cyan),
-            spectrum_peak: rgb(yellow),
+            spectrum: rgb(spectrum),
+            spectrum_peak: rgb(spectrum_peak),
             error: rgb(red),
         }
     }
@@ -282,6 +322,53 @@ impl Theme {
     pub fn fill(self) -> Style {
         self.text()
     }
+}
+
+/// First palette role that still reads as a bar: saturated, off the
+/// background, off the foreground, and not the same as `avoid`.
+fn spectrum_color(
+    palette: &Palette,
+    keys: &[&str],
+    background: Rgb,
+    foreground: Rgb,
+    avoid: Option<Rgb>,
+) -> Rgb {
+    for key in keys {
+        let Some(color) = palette.get(key) else {
+            continue;
+        };
+        if !readable_bar(color, background, foreground) {
+            continue;
+        }
+        if avoid.is_some_and(|other| distance_sq(color, other) < 60 * 60) {
+            continue;
+        }
+        return color;
+    }
+    Rgb {
+        r: 80,
+        g: 200,
+        b: 255,
+    }
+}
+
+fn readable_bar(color: Rgb, background: Rgb, foreground: Rgb) -> bool {
+    chroma(color) >= 48
+        && distance_sq(color, background) >= 90 * 90
+        && distance_sq(color, foreground) >= 70 * 70
+}
+
+fn chroma(color: Rgb) -> i32 {
+    let max = i32::from(color.r.max(color.g).max(color.b));
+    let min = i32::from(color.r.min(color.g).min(color.b));
+    max - min
+}
+
+fn distance_sq(a: Rgb, b: Rgb) -> i32 {
+    let dr = i32::from(a.r) - i32::from(b.r);
+    let dg = i32::from(a.g) - i32::from(b.g);
+    let db = i32::from(a.b) - i32::from(b.b);
+    dr * dr + dg * dg + db * db
 }
 
 fn pick(palette: &Palette, keys: &[&str], fallback: Rgb) -> Rgb {
@@ -566,9 +653,43 @@ lighter_background = "#24283b"
         assert_eq!(theme.edit_bg, Color::Rgb(0x7a, 0xa2, 0xf7));
         assert_eq!(theme.error, Color::Rgb(0xf7, 0x76, 0x8e));
         assert_eq!(theme.waveform, Color::Rgb(0x44, 0x9d, 0xab));
+        assert_eq!(theme.spectrum, Color::Rgb(0x44, 0x9d, 0xab));
+        assert_eq!(theme.spectrum_peak, Color::Rgb(0xe0, 0xaf, 0x68));
         assert_eq!(theme.channels[0], theme.error);
         assert_eq!(theme.note, Color::Rgb(0x9e, 0xce, 0x6a));
         assert_ne!(theme.play_bg, theme.background);
+    }
+
+    #[test]
+    fn matte_black_spectrum_is_not_the_foreground_gray() {
+        // Omarchy's Matte Black stores the foreground in color6, which the
+        // palette aliases to cyan. A bar painted with that is a light gray slab.
+        let palette = omarchy::palette_from_colors_toml(
+            r##"
+background = "#121212"
+foreground = "#bebebe"
+accent = "#e68e0d"
+color1 = "#D35F5F"
+color2 = "#FFC107"
+color3 = "#b91c1c"
+color4 = "#e68e0d"
+color5 = "#D35F5F"
+color6 = "#bebebe"
+color7 = "#bebebe"
+color8 = "#8a8a8d"
+color14 = "#eaeaea"
+color15 = "#ffffff"
+"##,
+        )
+        .unwrap();
+        let theme = Theme::from_palette(&palette);
+        assert_eq!(theme.text, Color::Rgb(0xbe, 0xbe, 0xbe));
+        assert_ne!(theme.spectrum, theme.text);
+        assert_ne!(theme.spectrum, Color::Rgb(0xea, 0xea, 0xea));
+        assert_ne!(theme.spectrum, Color::White);
+        assert_eq!(theme.spectrum, Color::Rgb(0xe6, 0x8e, 0x0d));
+        assert_eq!(theme.spectrum_peak, Color::Rgb(0xb9, 0x1c, 0x1c));
+        assert_ne!(theme.spectrum_peak, theme.spectrum);
     }
 
     #[test]
