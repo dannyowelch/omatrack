@@ -287,7 +287,16 @@ impl Playback {
         }
     }
 
-    /// Begin at `order` / `row`. Voice memory is cleared; mutes are kept.
+    /// Begin at `order` / `row`.
+    ///
+    /// Voice memory, sample cursors, effect memory, pattern-loop counters,
+    /// pattern delay, and the song-loop visit map are cleared, and channel
+    /// peaks drop to zero. A note that was still sounding does not continue,
+    /// and a pattern loop that was already running does not jump again until
+    /// the song reaches that command from the new position. Mutes and
+    /// [`Self::set_stop_on_loop`] are kept, so a song that had already looped
+    /// can play again. Passing order 0 and row 0 restarts at the top of the
+    /// song, which is not the module's restart byte.
     pub fn start(&mut self, module: &Module, order: usize, row: usize) {
         let muted = self.voices.map(|voice| voice.muted);
         let config = self.config;

@@ -114,6 +114,14 @@ impl AudioOutput {
         self.viz.load()
     }
 
+    /// Forget the last analysis window.
+    ///
+    /// Channel meters and the spectrum read this slot. Clearing it keeps a
+    /// rewind from holding the previous mix until the next publish.
+    pub fn clear_visualization(&self) {
+        self.viz.clear();
+    }
+
     /// Mixer settings from the config file. The device rate still wins when it
     /// cannot play [`PlayerConfig::sample_rate`].
     pub fn set_preferences(&mut self, config: PlayerConfig) {

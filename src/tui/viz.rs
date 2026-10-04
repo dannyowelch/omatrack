@@ -97,7 +97,8 @@ pub(crate) fn draw_scope_view(frame: &mut Frame, area: Rect, app: &App, theme: T
     if header == 1 {
         let title = Rect { height: 1, ..area };
         frame.render_widget(
-            Paragraph::new("Scope    F5 cycles    space plays").style(theme.title()),
+            Paragraph::new("Scope    F5 cycles    space plays    Ctrl-R start")
+                .style(theme.title()),
             title,
         );
     }

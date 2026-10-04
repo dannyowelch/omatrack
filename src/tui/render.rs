@@ -20,11 +20,12 @@ use super::viz;
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "Ctrl-F file  Enter edit  F5 viz  ? help  Ctrl-S save  space play  q quit";
+const HELP: &str = "Ctrl-F file  Enter edit  F5 viz  ? help  Ctrl-S  space play  Ctrl-R q quit";
 
 const HELP_LINES: &[&str] = &[
     "Omatrack keys                                          ? or Esc closes",
     "Enter edit/browse   Space play/stop   Ctrl-S save   Ctrl-Z undo  Ctrl-Y redo",
+    "Ctrl-R rewinds. Playing continues; stopped only moves. r types a note.",
     "Ctrl-Q quits anywhere. q quits from browse. Esc: block, then edit, then quit.",
     "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
@@ -1171,6 +1172,14 @@ mod tests {
         app.overlay = Overlay::Help;
         let screen = text_of(&render(&mut app, 80, 24));
         assert_has(&screen, "Ctrl-S save");
+        assert_has(&screen, "Ctrl-R rewinds");
+        assert_has(&screen, "stopped only moves");
+        assert_has(&screen, "r types a note");
+        assert!(
+            HELP.chars().count() <= 76,
+            "footer is {} columns",
+            HELP.chars().count()
+        );
         assert_has(&screen, "Ctrl-Z undo");
         assert_has(&screen, "Z S X D C V G B H N J M");
         assert_has(&screen, "unsaved");
@@ -1184,6 +1193,7 @@ mod tests {
         let screen = text_of(&render(&mut app, 80, 24));
         assert_has(&screen, "Demo Tune *");
         assert_has(&screen, "VIEW*");
+        assert_has(&screen, "Ctrl-R");
     }
 
     #[test]

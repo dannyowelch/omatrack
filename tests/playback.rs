@@ -3,7 +3,7 @@
 use omatrack::demo::showcase;
 use omatrack::player::{
     pal_hz, sample_step, samples_per_tick, tuned_period, Interpolation, Playback, PlayerConfig,
-    PAL_CLOCK_HZ,
+    DEFAULT_SPEED, DEFAULT_TEMPO, PAL_CLOCK_HZ,
 };
 use omatrack::{wav_bytes, Cell, Module, Tag};
 
@@ -462,6 +462,108 @@ fn pattern_break_uses_decimal_digits_and_the_song_loops() {
     assert!(playback.looped());
     let mut buffer = vec![0i16; 8];
     assert_eq!(playback.render(&single, &mut buffer), 0);
+}
+
+#[test]
+fn restart_clears_voices_pattern_loops_and_peaks() {
+    let mut module = tone(428, 0xE, 0x60);
+    module.restart = 3;
+    module.song_length = 4;
+    module.patterns[0].rows[0][2] = Cell {
+        sample: 0,
+        period: 0,
+        effect: 0xF,
+        param: 0x80,
+    };
+    module.patterns[0].rows[0][3] = Cell {
+        sample: 0,
+        period: 0,
+        effect: 0xF,
+        param: 0x01,
+    };
+    module.patterns[0].rows[1][0] = Cell {
+        sample: 1,
+        period: 381,
+        effect: 0xE,
+        param: 0x61,
+    };
+
+    let mut playback = start(&module, 8_000);
+    playback.set_mute(1, true);
+    playback.start(&module, 3, 20);
+    assert_eq!(playback.order(), 3);
+    assert_eq!(playback.row(), 20);
+    assert!(playback.channel(1).unwrap().muted);
+    playback.start(&module, 0, 0);
+    assert_eq!(playback.order(), 0);
+    assert_eq!(playback.row(), 0);
+    for _ in 0..4 {
+        tick(&mut playback, &module);
+    }
+    assert_eq!(playback.row(), 2, "the pattern loop has already been spent");
+    assert_eq!(playback.tempo(), 128);
+    assert_eq!(playback.speed(), 1);
+    let held = playback.channel(0).unwrap();
+    assert!(held.active);
+    assert!(held.position > 0);
+    assert_ne!(held.period, 0);
+    assert!(playback.channel_peaks().iter().any(|peak| *peak > 0));
+
+    playback.start(&module, 0, 0);
+    assert_eq!(playback.order(), 0);
+    assert_eq!(playback.row(), 0);
+    assert_eq!(playback.tick(), 0);
+    assert_eq!(playback.speed(), DEFAULT_SPEED);
+    assert_eq!(playback.tempo(), DEFAULT_TEMPO);
+    assert!(!playback.looped());
+    assert!(!playback.is_halted());
+    assert!(playback.is_playing());
+    assert_eq!(playback.channel_peaks(), [0; 4]);
+    let reset = playback.channel(0).unwrap();
+    assert!(!reset.active);
+    assert_eq!(reset.sample, 0);
+    assert_eq!(reset.period, 0);
+    assert_eq!(reset.volume, 0);
+    assert_eq!(reset.position, 0);
+    assert!(playback.channel(1).unwrap().muted);
+    assert!(!playback.channel(0).unwrap().muted);
+
+    // The spent E61 count must not stick. Two ticks from a fresh start jump
+    // back to the loop point, the same as a player that never ran the loop.
+    for _ in 0..2 {
+        tick(&mut playback, &module);
+    }
+    assert_eq!(playback.row(), 0);
+    assert_eq!(playback.order(), 0);
+    assert_eq!(playback.channel(0).unwrap().period, 381);
+    let fresh = play(&module, 8_000, 2);
+    assert_eq!(playback.row(), fresh.row());
+    assert_eq!(
+        playback.channel(0).unwrap().position,
+        fresh.channel(0).unwrap().position
+    );
+
+    module.song_length = 1;
+    let mut until_end = start(&module, 8_000);
+    until_end.set_stop_on_loop(true);
+    for _ in 0..80 {
+        if until_end.looped() {
+            break;
+        }
+        tick(&mut until_end, &module);
+    }
+    assert!(until_end.looped());
+    let mut silence = vec![9i16; 8];
+    assert_eq!(until_end.render(&module, &mut silence), 0);
+    assert_eq!(silence, [0, 0, 0, 0, 0, 0, 0, 0]);
+    until_end.start(&module, 0, 0);
+    assert!(!until_end.looped());
+    assert_eq!(until_end.order(), 0);
+    assert_eq!(until_end.row(), 0);
+    tick(&mut until_end, &module);
+    assert!(until_end.is_playing());
+    assert_eq!(until_end.row(), 1);
+    assert!(until_end.channel(0).unwrap().active);
 }
 
 #[test]

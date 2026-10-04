@@ -63,8 +63,25 @@ impl VizBus {
         self.seq.fetch_add(1, Ordering::Release);
     }
 
+    /// Drop the latest window.
+    ///
+    /// [`Self::load`] stays `None` until the next [`Self::publish`], so a
+    /// rewind cannot paint the mix that was on screen a moment ago.
+    pub fn clear(&self) {
+        self.seq.fetch_add(1, Ordering::Release);
+        for sample in self.samples.iter() {
+            sample.store(0, Ordering::Relaxed);
+        }
+        for peak in &self.peaks {
+            peak.store(0, Ordering::Relaxed);
+        }
+        self.rate.store(0, Ordering::Relaxed);
+        self.seq.fetch_add(1, Ordering::Release);
+    }
+
     /// Copy the latest stable window. `None` if a publish is in progress
-    /// for every attempt, or if nothing has been published yet.
+    /// for every attempt, if nothing has been published yet, or after
+    /// [`Self::clear`].
     pub fn load(&self) -> Option<VizSnapshot> {
         for _ in 0..4 {
             let start = self.seq.load(Ordering::Acquire);
@@ -299,5 +316,18 @@ mod tests {
         assert_eq!(snap.gen, 80);
         assert_eq!(snap.stereo[0], 79);
         assert_eq!(snap.peaks[0], 79);
+    }
+
+    #[test]
+    fn clear_forgets_the_window_until_the_next_publish() {
+        let bus = VizBus::new();
+        bus.publish(&[1_000, -1_000], [9_000, 1, 2, 3], 44_100);
+        assert_eq!(bus.load().expect("published").peaks[0], 9_000);
+        bus.clear();
+        assert!(bus.load().is_none());
+        bus.publish(&[4, 5], [7, 0, 0, 0], 44_100);
+        let snap = bus.load().expect("republished");
+        assert_eq!(snap.peaks, [7, 0, 0, 0]);
+        assert_eq!(snap.stereo[0], 4);
     }
 }

@@ -131,6 +131,8 @@ pub enum Command {
     LastOrder,
     /// Start playback from the cursor, or stop it.
     TogglePlay,
+    /// Jump to order 0, row 0. Playback continues when it was already running.
+    Rewind,
     /// Silence or restore channel `0..4`.
     ToggleMute(usize),
     /// Enter or leave edit mode.
@@ -305,6 +307,8 @@ pub enum Outcome {
     },
     /// Play or stop.
     Play,
+    /// Move to the start of the song. Restart audio only when playback is on.
+    Rewind,
     /// Channel mute flipped.
     Mute(usize),
     /// Write the module to its path.
@@ -629,6 +633,7 @@ impl App {
                 }
                 Outcome::Play
             }
+            Command::Rewind => self.rewind_to_start(),
             Command::ToggleMute(channel) => {
                 if let Some(muted) = self.muted.get_mut(channel) {
                     *muted = !*muted;
@@ -791,6 +796,28 @@ impl App {
         self.playing = false;
         self.message = Some(message.to_string());
         Outcome::DocumentReplaced
+    }
+
+    /// Move the playhead to order 0, row 0.
+    ///
+    /// Channel mutes, the edit cursor, and focus stay. Voices are restarted
+    /// by the audio owner when [`Outcome::Rewind`] finds playback running.
+    /// Analyzer levels are dropped here so a meter cannot keep the old mix.
+    fn rewind_to_start(&mut self) -> Outcome {
+        self.order_pos = 0;
+        self.row = 0;
+        self.row_offset = 0;
+        let pattern = usize::from(self.module.order[0]);
+        if pattern < self.module.patterns.len() {
+            self.retarget_pattern(pattern);
+        }
+        self.speed = DEFAULT_SPEED;
+        self.tempo = DEFAULT_TEMPO;
+        self.viz = VizState::new();
+        if self.playing {
+            self.audio_error = None;
+        }
+        Outcome::Rewind
     }
 
     fn reset_view(&mut self) {
@@ -1374,6 +1401,7 @@ fn global_key(key: Key) -> Option<Command> {
         Key::Ctrl('b') => Some(Command::ToggleBlock),
         Key::Ctrl('a') => Some(Command::SelectAll),
         Key::Char(' ') => Some(Command::TogglePlay),
+        Key::Ctrl('r') => Some(Command::Rewind),
         Key::Enter => Some(Command::ToggleEdit),
         Key::Char('?') => Some(Command::ShowHelp),
         Key::F(1) => Some(Command::Octave(-1)),
@@ -1850,5 +1878,125 @@ mod tests {
         assert_eq!(app.viz_mode(), VizMode::Panel);
         app.set_preferences(2, 1, PlayerConfig::default(), 600.0, VizMode::Off);
         assert_eq!(app.viz_mode(), VizMode::Off);
+    }
+
+    #[test]
+    fn ctrl_r_rewinds_every_pane_and_leaves_r_for_notes_and_rename() {
+        let mut app = app_with_patterns(3);
+        app.module.restart = 2;
+        app.order_pos = 2;
+        app.row = 17;
+        app.channel = 3;
+        app.sample = 4;
+        app.speed = 3;
+        app.tempo = 140;
+        app.muted[1] = true;
+        app.tick_viz(Some(&loud_snapshot(1)), 0.05);
+        assert!(app.viz.meter(0).1 > 0.0);
+
+        assert_eq!(command_for(&app, Key::Ctrl('r')), Some(Command::Rewind));
+        assert_eq!(command_for(&app, Key::Ctrl('R')), Some(Command::Rewind));
+        assert_eq!(command_for(&app, Key::Char('r')), None);
+
+        app.focus = Focus::Samples;
+        assert_eq!(command_for(&app, Key::Ctrl('r')), Some(Command::Rewind));
+        assert_eq!(
+            command_for(&app, Key::Char('r')),
+            Some(Command::BeginSampleName)
+        );
+
+        app.focus = Focus::Order;
+        assert_eq!(command_for(&app, Key::Ctrl('r')), Some(Command::Rewind));
+        assert_eq!(command_for(&app, Key::Char('n')), Some(Command::NewPattern));
+
+        app.focus = Focus::Pattern;
+        app.editing = true;
+        app.field = Field::Note;
+        assert_eq!(
+            command_for(&app, Key::Char('r')),
+            Some(Command::EnterNote(17))
+        );
+        assert_eq!(command_for(&app, Key::Ctrl('r')), Some(Command::Rewind));
+        app.field = Field::Effect;
+        assert_eq!(command_for(&app, Key::Char('r')), None);
+        assert_eq!(
+            command_for(&app, Key::Char('c')),
+            Some(Command::EnterDigit(0x0C))
+        );
+        assert_eq!(command_for(&app, Key::Ctrl('r')), Some(Command::Rewind));
+        app.field = Field::SampleLow;
+        assert_eq!(command_for(&app, Key::Char('r')), None);
+        assert_eq!(
+            command_for(&app, Key::Char('4')),
+            Some(Command::EnterDigit(4))
+        );
+
+        app.apply(Command::BeginTitle);
+        assert!(matches!(app.overlay, Overlay::Text { .. }));
+        assert_eq!(command_for(&app, Key::Ctrl('r')), None);
+        assert_eq!(
+            command_for(&app, Key::Char('r')),
+            Some(Command::TextPush('r'))
+        );
+        app.apply(Command::TextCancel);
+
+        app.apply(Command::ShowHelp);
+        assert_eq!(command_for(&app, Key::Ctrl('r')), None);
+        app.apply(Command::CloseOverlay);
+        app.apply(Command::ShowFile);
+        assert_eq!(command_for(&app, Key::Ctrl('r')), None);
+        app.apply(Command::CloseOverlay);
+
+        app.editing = true;
+        app.focus = Focus::Pattern;
+        app.order_pos = 2;
+        app.row = 17;
+        app.view_pattern = 2;
+        let stopped = app.apply(Command::Rewind);
+        assert!(matches!(stopped, Outcome::Rewind));
+        assert!(!app.playing);
+        assert!(app.editing);
+        assert_eq!(app.focus, Focus::Pattern);
+        assert_eq!(app.channel, 3);
+        assert_eq!(app.sample, 4);
+        assert!(app.muted[1]);
+        assert!(!app.muted[0]);
+        assert_eq!(app.order_pos, 0);
+        assert_eq!(app.row, 0);
+        assert_eq!(app.row_offset, 0);
+        assert_eq!(app.view_pattern, 0);
+        assert_eq!(app.speed, DEFAULT_SPEED);
+        assert_eq!(app.tempo, DEFAULT_TEMPO);
+        assert_eq!(app.viz.meter(0), (0.0, 0.0));
+        assert!(!app.is_dirty());
+
+        app.order_pos = 1;
+        app.row = 9;
+        app.speed = 2;
+        app.tempo = 150;
+        app.playing = true;
+        app.tick_viz(Some(&loud_snapshot(2)), 0.05);
+        assert!(app.viz.meter(0).1 > 0.0);
+        let playing = app.apply(Command::Rewind);
+        assert!(matches!(playing, Outcome::Rewind));
+        assert!(app.playing);
+        assert_eq!(app.order_pos, 0);
+        assert_eq!(app.row, 0);
+        assert_eq!(app.speed, DEFAULT_SPEED);
+        assert_eq!(app.tempo, DEFAULT_TEMPO);
+        assert_eq!(app.viz.meter(0), (0.0, 0.0));
+        assert!(app.muted[1]);
+    }
+
+    fn loud_snapshot(gen: u64) -> VizSnapshot {
+        let mut stereo = [0i16; crate::viz::WINDOW * 2];
+        stereo[0] = 20_000;
+        stereo[1] = 10_000;
+        VizSnapshot {
+            stereo,
+            peaks: [8_000, 4_000, 2_000, 1_000],
+            rate: 44_100,
+            gen,
+        }
     }
 }

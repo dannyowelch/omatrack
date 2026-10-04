@@ -383,6 +383,8 @@ keeps the pattern and does not report an error.
 Keys:
     Enter                edit / browse
     space                play / stop
+    Ctrl-R               rewind to order 0, row 0
+                         (playing continues; stopped only moves the cursor)
     ?                    key list
     Ctrl-F               file menu: n new, o open, s save, a save as
     Ctrl-S               save (save as, when the module is untitled)
@@ -482,6 +484,8 @@ mod tests {
         let help = help();
         assert!(help.contains("default_view"));
         assert!(help.contains("spectrum, scope, or off"));
+        assert!(help.contains("Ctrl-R"));
+        assert!(help.contains("order 0, row 0"));
     }
 
     #[test]

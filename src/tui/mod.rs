@@ -104,7 +104,8 @@ pub struct Session {
 
 /// Show `session` until the user quits.
 ///
-/// Space starts playback from the cursor. Enter toggles edit mode. If no
+/// Space starts playback from the cursor. Ctrl-R rewinds to order 0, row 0.
+/// Enter toggles edit mode. If no
 /// output device can be opened, the transport bar shows the error and the
 /// view stays up. Note preview is skipped when that happens. The terminal is
 /// restored on quit and on panic. SIGUSR1, or a change to the watched theme
@@ -236,6 +237,16 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
                 }
             } else if was_playing {
                 audio.stop();
+            }
+        }
+        Outcome::Rewind => {
+            // Drop the previous mix before the stream restarts, including
+            // when playback stays stopped and no new window is coming.
+            audio.clear_visualization();
+            if app.playing {
+                if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
+                    app.fail_audio(err.to_string());
+                }
             }
         }
         Outcome::Mute(channel) => audio.set_mute(channel, app.muted[channel]),
@@ -440,6 +451,8 @@ mod tests {
         assert_eq!(map_key(ctrl), Some(AppKey::Ctrl('c')));
         let ctrl_code = KeyEvent::new(KeyCode::Char('\u{13}'), KeyModifiers::CONTROL);
         assert_eq!(map_key(ctrl_code), Some(AppKey::Ctrl('s')));
+        let ctrl_r = KeyEvent::new(KeyCode::Char('\u{12}'), KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_r), Some(AppKey::Ctrl('r')));
 
         let alt = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::ALT);
         assert_eq!(map_key(alt), Some(AppKey::Alt('k')));
