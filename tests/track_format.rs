@@ -17,7 +17,7 @@ fn cc0_fixtures_load_and_make_sound() {
         ("tests/data/jingle_bells_drmccoy_CC0.it", Format::It, 8),
     ];
     for (path, format, channels) in cases {
-        let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+        let bytes = read_fixture(path);
         let song = load_track(&bytes);
         assert_eq!(song.format, format, "{path}");
         assert_eq!(song.channels, channels, "{path} title {}", song.title);
@@ -129,6 +129,50 @@ struct Stats {
     frames: usize,
     peak: u16,
     tail: u16,
+}
+
+/// The CC0 modules are stored as the original bytes and as ASCII base64 so a
+/// text-only upload still carries them. When both exist they must match.
+fn read_fixture(path: &str) -> Vec<u8> {
+    let encoded = std::fs::read_to_string(format!("{path}.b64"))
+        .unwrap_or_else(|err| panic!("{path}.b64: {err}"));
+    let decoded = b64_decode(&encoded);
+    if let Ok(bytes) = std::fs::read(path) {
+        assert_eq!(bytes, decoded, "{path} does not match {path}.b64");
+    }
+    decoded
+}
+
+fn b64_decode(text: &str) -> Vec<u8> {
+    fn val(byte: u8) -> u8 {
+        match byte {
+            b'A'..=b'Z' => byte - b'A',
+            b'a'..=b'z' => byte - b'a' + 26,
+            b'0'..=b'9' => byte - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => 0,
+        }
+    }
+    let bytes: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        if chunk.len() < 2 {
+            break;
+        }
+        let a = val(chunk[0]);
+        let b = val(chunk[1]);
+        out.push((a << 2) | (b >> 4));
+        if chunk.len() > 2 && chunk[2] != b'=' {
+            let c = val(chunk[2]);
+            out.push((b << 4) | (c >> 2));
+            if chunk.len() > 3 && chunk[3] != b'=' {
+                let d = val(chunk[3]);
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    out
 }
 
 fn load_track(bytes: &[u8]) -> omatrack::Song {
