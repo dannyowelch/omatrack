@@ -2,7 +2,7 @@
 
 Omatrack is a ProTracker / Amiga-style music tracker for [Omarchy](https://omarchy.org) Linux (Arch + Hyprland), written in Rust as a terminal UI. It also runs in any terminal that can host a normal Rust binary.
 
-It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. F5 cycles a spectrum and channel meters, then a full-screen scope.
+It loads a 4-channel `.mod`, shows it, plays it, and edits it. With no file it reopens the last module, or starts an empty one when there is nothing to reopen. Space starts playback from the cursor. Enter switches between browse and edit. The pattern highlight follows the song until you are editing. Ctrl-S writes the file back, and asks for a path when the module is still untitled. Ctrl-F is the file menu: new, open, save, and save as. A `*` after the title means the song has unsaved edits. Quit, new, and open ask before discarding them. The spectrum is up at launch. F5 cycles that view, then a full-screen scope, then off.
 
 Colors follow the active Omarchy theme when one is installed. Otherwise the screen is the built-in ProTracker blue. `--theme` can force either of those, a green phosphor palette, or plain ANSI colors that track the terminal's own theme.
 
@@ -81,7 +81,7 @@ Tab              pattern, samples, order
 1 2 3 4          mute that channel (Alt-1..4 while editing)
 Up/Down, j/k     move the cursor
 Left/Right, h/l  change channel (pattern view)
-F5               cycle visualization: off, spectrum, scope
+F5               cycle visualization: spectrum, scope, off
 PgUp/PgDn        page
 Home/End         first or last row, or sample
 [ ]              previous / next order position
@@ -98,6 +98,7 @@ Home/End         first or last row, or sample
 
 ```toml
 reopen_last = true
+default_view = "spectrum"
 theme = "auto"
 
 [audio]
@@ -114,6 +115,8 @@ step = 1
 `--rate`, `--interpolate`, `--separation`, and `--max-seconds` override the audio section for `--render`. Live playback asks the device for `sample_rate` and uses the device's own rate when it cannot play that one. Interpolation and stereo separation still apply. Sample audition stays centered.
 
 `reopen_last` (default `true`) loads the last module when the command line does not name one. `--no-reopen` skips that for one launch. A file argument always wins. The path is not stored in this file: it lives at `$XDG_STATE_HOME/omatrack/last_file`, or `~/.local/state/omatrack/last_file`. Open, save, and save as update it. New clears it. A missing, unreadable, or invalid remembered file starts an empty module and puts a short reason on the status line.
+
+`default_view` is `spectrum`, `scope`, or `off`. The default is `spectrum`. F5 still cycles spectrum, scope, off. A terminal shorter than about 28 rows hides the spectrum panel and keeps the pattern; that is not an error, and F5 still reaches the scope.
 
 ### Themes
 
@@ -194,9 +197,9 @@ If no output device can be opened, the tracker stays up and the transport bar na
 
 ## Visualization
 
-F5 cycles three views: off, a spectrum panel, and a full-screen scope. The same key works while editing. The transport bar says `Viz` or `Scope` while one is up.
+The tracker opens on the spectrum. F5 cycles three views: the spectrum panel, a full-screen scope, then off, then the spectrum again. The same key works while editing. The transport bar says `Viz` or `Scope` while one is up. `default_view` in the config file selects the startup view.
 
-The panel sits under the sample list and above the transport bar, so the pattern keeps its rows. It draws a log-spaced spectrum of the final stereo mix (mono average, Hann window, 512-point FFT) with Unicode block bars, smoothed and peak-held, plus four channel meters. Each meter is that Amiga channel's peak `|sample × volume|` over the latest mix window, so a mute or a volume of 0 reads empty. Peak marks hold, then fall. The panel needs a terminal about 28 rows tall (80×24 keeps the pattern and hides the panel). F5 still reaches the scope, which fits the usual view.
+The panel sits under the sample list and above the transport bar, so the pattern keeps its rows. It draws a log-spaced spectrum of the final stereo mix (mono average, Hann window, 512-point FFT) with Unicode block bars, plus four channel meters. Each meter is that Amiga channel's peak `|sample × volume|` over the latest mix window, so a mute or a volume of 0 reads empty. Bars rise quickly and fall on a clock, not a frame count. A one-cell peak cap holds for a bit under a second, then drops at a steady rate. The panel needs a terminal about 28 rows tall (80×24 keeps the pattern and hides the panel, with no error). F5 still reaches the scope, which fits the usual view.
 
 The scope is a braille canvas (U+2800). It draws a Lissajous trace of the stereo mix and four diamonds, one per channel, that grow and orbit with that channel's level. It repaints with the UI, about 30 frames per second while it is the thing on screen and playback is stopped, and with the playhead while a song is running.
 

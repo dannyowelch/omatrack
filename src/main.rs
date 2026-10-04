@@ -127,6 +127,7 @@ fn run() -> Result<(), MainError> {
         max_seconds: settings.max_seconds,
         octave: settings.octave,
         step: settings.step,
+        default_view: settings.default_view,
         notice: if notice.is_empty() {
             None
         } else {
@@ -375,6 +376,10 @@ or omarchy. SIGUSR1 reloads it, and so does a change to the theme file.
 protracker and phosphor are built in. terminal uses ANSI colors so the
 terminal's own theme shows through.
 
+The tracker opens on the spectrum. default_view in the config file is
+spectrum, scope, or off. A terminal too short for the spectrum panel
+keeps the pattern and does not report an error.
+
 Keys:
     Enter                edit / browse
     space                play / stop
@@ -387,7 +392,8 @@ Keys:
     1 2 3 4              mute channel (Alt-1..4 in edit mode)
     Up/Down, j/k         move the cursor
     Left/Right, h/l      change channel (pattern view)
-    F5                   cycle visualization: off, spectrum, scope
+    F5                   cycle visualization: spectrum, scope, off
+                         (startup view is spectrum; config default_view)
     PgUp/PgDn            page
     Home/End             first or last row, or sample
     [ ]                  previous / next order position
@@ -473,6 +479,9 @@ mod tests {
             parse(&args(&["song.mod", "--theme", "nope"])),
             Err(MainError::Usage(_))
         ));
+        let help = help();
+        assert!(help.contains("default_view"));
+        assert!(help.contains("spectrum, scope, or off"));
     }
 
     #[test]

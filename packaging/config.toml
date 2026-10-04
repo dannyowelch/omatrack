@@ -12,6 +12,14 @@
 # it for one launch. A missing or unreadable module starts empty.
 reopen_last = true
 
+# Visualization at startup. F5 cycles spectrum, scope, off.
+#   spectrum   bars and the four channel meters
+#   scope      full-screen vectorscope
+#   off        pattern only, until F5
+# A terminal shorter than about 28 rows keeps the pattern and hides the
+# spectrum panel. That is not an error; F5 still reaches the scope.
+default_view = "spectrum"
+
 # theme: auto | omarchy | protracker | phosphor | terminal
 #   auto       use the active Omarchy theme, or protracker when it is absent
 #   omarchy    require the Omarchy theme; protracker if none is installed

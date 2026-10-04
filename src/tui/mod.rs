@@ -94,6 +94,8 @@ pub struct Session {
     pub octave: u8,
     /// Edit step.
     pub step: u8,
+    /// Visualization shown when the tracker opens.
+    pub default_view: VizMode,
     /// Shown once, in the error color. Config and theme warnings land here.
     pub notice: Option<String>,
     /// `last_file` path. Open, save, and new update it.
@@ -127,12 +129,13 @@ pub fn run(session: Session) -> Result<(), Error> {
         max_seconds,
         octave,
         step,
+        default_view,
         notice,
         state_path,
     } = session;
     let mut app = App::open(module, path);
     app.set_theme(theme, theme_label);
-    app.set_preferences(octave, step, player, max_seconds);
+    app.set_preferences(octave, step, player, max_seconds, default_view);
     if let Some(notice) = notice {
         app.set_error(notice);
     }

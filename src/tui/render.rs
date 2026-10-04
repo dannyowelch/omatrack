@@ -29,7 +29,8 @@ const HELP_LINES: &[&str] = &[
     "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
     "Arrows move. Tab changes pane; in edit, Tab changes channel.",
-    "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles visualization",
+    "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles spectrum, scope, off",
+    "Startup view is the spectrum. Config default_view is spectrum, scope, or off.",
     "Alt-1..4 mute a channel while editing. 1-4 mute in browse.",
     "",
     "Edit mode. Lower row is the octave, upper row is one octave higher.",
@@ -1170,7 +1171,8 @@ mod tests {
         assert_has(&screen, "unsaved");
         assert_has(&screen, "import WAV");
         assert_has(&screen, "R still renames");
-        assert_has(&screen, "F5 cycles visualization");
+        assert_has(&screen, "F5 cycles spectrum, scope, off");
+        assert_has(&screen, "default_view");
 
         let mut app = demo();
         app.apply(Command::EnterNote(0));
@@ -1182,12 +1184,13 @@ mod tests {
     #[test]
     fn the_spectrum_fits_a_tall_terminal_and_stays_hidden_on_a_short_one() {
         let mut app = demo();
-        app.apply(Command::CycleViz);
+        assert_eq!(app.viz_mode(), VizMode::Panel);
         app.message = None;
         let short = text_of(&render(&mut app, 80, 24));
         assert_has(&short, "Demo Tune");
         assert_has(&short, "C-1");
         assert!(!short.contains("Spectrum"), "{short}");
+        assert!(!short.contains("too small"), "{short}");
         assert_has(&short, "Viz");
 
         let mut snap = quiet_tone();

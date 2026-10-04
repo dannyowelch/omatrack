@@ -2,11 +2,16 @@
 //! [`VizState::tick`], never inside the audio callback.
 
 use super::agc::AutoGain;
-use super::ballistics::{Ballistics, Meter};
+use super::ballistics::{smooth_spectrum, Ballistics, Meter};
 use super::bands::{db_unit, spectrum_magnitudes};
 use super::bus::VizSnapshot;
 use super::WINDOW;
 use crate::player::CHANNEL_PEAK_SCALE;
+
+/// How long a missing or repeated window may sit before levels ease toward
+/// silence. Shorter gaps keep the last complete analysis and only advance
+/// the ballistics clock.
+const STALE_AFTER: f32 = 0.35;
 
 /// Bottom of the channel-meter curve. 0 dBFS is the top of the meter.
 /// A loud channel around −12..−6 dBFS lands near 60–80%.
@@ -23,8 +28,16 @@ pub struct VizState {
     stereo: Vec<f32>,
     phase: f32,
     last_gen: u64,
+    /// Seconds since a new analysis window arrived.
     stale: f32,
     agc: AutoGain,
+    /// Tilted linear band magnitudes from the last complete window.
+    magnitudes: Vec<f32>,
+    /// Loudest of [`Self::magnitudes`]. The normalizer keeps slewing toward it
+    /// on frames that do not carry a new window.
+    last_mag_peak: f32,
+    /// Channel-meter targets from the last complete window, `0..=1`.
+    meter_input: [f32; 4],
 }
 
 impl Default for VizState {
@@ -37,6 +50,9 @@ impl Default for VizState {
             last_gen: 0,
             stale: 0.0,
             agc: AutoGain::default(),
+            magnitudes: Vec::new(),
+            last_mag_peak: 0.0,
+            meter_input: [0.0; 4],
         }
     }
 }
@@ -50,9 +66,12 @@ impl VizState {
     /// Fold one UI frame.
     ///
     /// `snapshot` is the latest mix window, or `None` when the callback has
-    /// not published yet. A snapshot whose generation has not changed does not
-    /// recompute the FFT. After a short gap with no new audio, levels fall
-    /// toward silence. `dt` is seconds since the previous call.
+    /// not published yet (including a torn read the bus refused). A snapshot
+    /// whose generation has not changed does not recompute the FFT and does
+    /// not clear the meters: the last complete window stays the target and
+    /// the ballistics advance by `dt`. After [`STALE_AFTER`] seconds with no
+    /// new window, levels ease toward silence instead of jumping there.
+    /// `dt` is seconds since the previous call.
     pub fn tick(&mut self, snapshot: Option<&VizSnapshot>, dt: f32) {
         let dt = if dt.is_finite() {
             dt.clamp(0.0, 0.25)
@@ -65,10 +84,12 @@ impl VizState {
             self.last_gen = snap.gen;
             self.stale = 0.0;
             self.ingest(snap, dt);
-        } else {
+        } else if self.last_gen != 0 {
             self.stale += dt;
-            if self.stale >= 0.08 {
+            if self.stale >= STALE_AFTER {
                 self.release(dt);
+            } else {
+                self.coast(dt);
             }
         }
         let energy = self.meters.iter().map(|meter| meter.level).sum::<f32>() / 4.0;
@@ -76,17 +97,14 @@ impl VizState {
     }
 
     fn ingest(&mut self, snap: &VizSnapshot, dt: f32) {
-        let magnitudes = spectrum_magnitudes(&snap.stereo, snap.rate, BARS);
-        let peak = magnitudes.iter().copied().fold(0.0f32, f32::max);
-        let gain = self.agc.update(peak, dt);
-        let ballistics = Ballistics::spectrum();
-        for (meter, magnitude) in self.bars.iter_mut().zip(magnitudes) {
-            meter.update(db_unit(magnitude * gain), dt, ballistics);
+        self.magnitudes = spectrum_magnitudes(&snap.stereo, snap.rate, BARS);
+        self.last_mag_peak = self.magnitudes.iter().copied().fold(0.0f32, f32::max);
+        let _ = self.agc.update(self.last_mag_peak, dt);
+        self.push_bars(dt);
+        for (slot, peak) in self.meter_input.iter_mut().zip(snap.peaks) {
+            *slot = channel_unit(peak);
         }
-        let meter_ballistics = Ballistics::meter();
-        for (meter, peak) in self.meters.iter_mut().zip(snap.peaks) {
-            meter.update(channel_unit(peak), dt, meter_ballistics);
-        }
+        self.push_meters(dt);
         self.stereo.clear();
         let frames = (snap.stereo.len() / 2).min(WINDOW);
         self.stereo.reserve(frames * 2);
@@ -95,6 +113,30 @@ impl VizState {
                 .push(f32::from(snap.stereo[index * 2]) / 32768.0);
             self.stereo
                 .push(f32::from(snap.stereo[index * 2 + 1]) / 32768.0);
+        }
+    }
+
+    /// Keep the last window. Gain and bar height still move with `dt`.
+    fn coast(&mut self, dt: f32) {
+        let _ = self.agc.update(self.last_mag_peak, dt);
+        self.push_bars(dt);
+        self.push_meters(dt);
+    }
+
+    fn push_bars(&mut self, dt: f32) {
+        let gain = self.agc.gain();
+        let levels: Vec<f32> = self
+            .magnitudes
+            .iter()
+            .map(|level| db_unit(*level * gain))
+            .collect();
+        smooth_spectrum(&mut self.bars, &levels, dt);
+    }
+
+    fn push_meters(&mut self, dt: f32) {
+        let ballistics = Ballistics::meter();
+        for (meter, input) in self.meters.iter_mut().zip(self.meter_input) {
+            meter.update(input, dt, ballistics);
         }
     }
 
@@ -214,10 +256,58 @@ mod tests {
         state.tick(Some(&snap), 0.05);
         let before = state.meter(0).0;
         state.tick(Some(&snap), 0.05);
-        assert!((state.meter(0).0 - before).abs() < 0.02, "same generation");
+        assert!(
+            state.meter(0).0 + 0.02 >= before,
+            "same generation dropped the meter {} -> {}",
+            before,
+            state.meter(0).0
+        );
         state.tick(None, 0.10);
         state.tick(None, 0.20);
         assert!(state.meter(0).0 < before, "{}", state.meter(0).0);
+    }
+
+    #[test]
+    fn a_duplicate_or_torn_snapshot_does_not_reset_the_spectrum() {
+        let mut state = VizState::new();
+        let mut snap = sine_snapshot(440.0, [8000, 0, 0, 0], 1);
+        state.tick(Some(&snap), 0.05);
+        let level = max_bar(&state);
+        let peak = max_peak(&state);
+        assert!(
+            level > 0.3 && peak + 0.001 >= level,
+            "level {level} peak {peak}"
+        );
+        for _ in 0..4 {
+            state.tick(Some(&snap), 0.02);
+        }
+        assert!(
+            max_bar(&state) > level * 0.75,
+            "duplicate window drained the bar to {}",
+            max_bar(&state)
+        );
+        assert!(
+            max_peak(&state) + 0.02 >= peak,
+            "peak hold cleared {} -> {}",
+            peak,
+            max_peak(&state)
+        );
+        state.tick(None, 0.02);
+        assert!(
+            max_bar(&state) > level * 0.6,
+            "a torn read wiped the bar to {}",
+            max_bar(&state)
+        );
+
+        snap.gen = 2;
+        snap.stereo = [0; WINDOW * 2];
+        snap.peaks = [0; 4];
+        state.tick(Some(&snap), 0.02);
+        assert!(
+            max_peak(&state) + 0.02 >= peak * 0.9,
+            "a new quiet window snapped the cap off {}",
+            max_peak(&state)
+        );
     }
 
     #[test]
@@ -258,6 +348,12 @@ mod tests {
     fn max_bar(state: &VizState) -> f32 {
         (0..state.bar_count())
             .map(|index| state.bar(index))
+            .fold(0.0f32, f32::max)
+    }
+
+    fn max_peak(state: &VizState) -> f32 {
+        (0..state.bar_count())
+            .map(|index| state.bar_peak(index))
             .fold(0.0f32, f32::max)
     }
 }
