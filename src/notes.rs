@@ -1,9 +1,9 @@
 //! ProTracker note names and effect labels.
 //!
 //! Cells store an Amiga period, not a note number. The table below is finetune
-//! 0, which is the period written into the pattern. Milestone 2's mixer should
-//! keep playback state elsewhere and apply each sample's finetune on top of
-//! these base periods.
+//! 0, which is the period written into the pattern. The replayer in
+//! [`crate::player`] keeps its own voice state and applies each sample's
+//! finetune on top of these base periods.
 
 /// Finetune-0 periods for C-1 through B-3, the range ProTracker edits.
 pub const PERIODS: [u16; 36] = [

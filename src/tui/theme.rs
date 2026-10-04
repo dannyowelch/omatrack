@@ -28,6 +28,8 @@ pub struct Theme {
     pub cursor_bg: Color,
     /// Background on the cursor row.
     pub row_bg: Color,
+    /// Background on the row the replayer is currently mixing.
+    pub play_bg: Color,
     /// Background on the selected order entry.
     pub order_bg: Color,
     /// Unfocused pane border.
@@ -50,6 +52,7 @@ impl Theme {
             cursor_fg: Color::Black,
             cursor_bg: Color::Yellow,
             row_bg: Color::Rgb(24, 36, 150),
+            play_bg: Color::Rgb(16, 92, 48),
             order_bg: Color::Rgb(210, 170, 40),
             border: Color::Rgb(80, 100, 170),
             border_focus: Color::Yellow,

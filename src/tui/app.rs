@@ -5,6 +5,7 @@
 //! [`App`] only remembers what the screen is showing.
 
 use crate::module::{Cell, Module, CHANNELS, ORDER_LEN, ROWS, SAMPLE_COUNT};
+use crate::player::{DEFAULT_SPEED, DEFAULT_TEMPO};
 
 /// Which pane receives movement keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +74,10 @@ pub enum Command {
     FirstSample,
     /// Jump to instrument 31.
     LastSample,
+    /// Start playback from the cursor, or stop it.
+    TogglePlay,
+    /// Silence or restore channel `0..4`.
+    ToggleMute(usize),
 }
 
 const PATTERN_PAGE: isize = 16;
@@ -90,6 +95,16 @@ pub struct App {
     pub(crate) sample: usize,
     pub(crate) row_offset: usize,
     pub(crate) sample_offset: usize,
+    /// The replayer is pulling audio.
+    pub(crate) playing: bool,
+    /// Ticks per row, from the replayer.
+    pub(crate) speed: u8,
+    /// CIA tempo, from the replayer.
+    pub(crate) tempo: u8,
+    /// Per-channel mute. Index 0 is channel 1.
+    pub(crate) muted: [bool; CHANNELS],
+    /// Last failure from opening the audio device, shown in the transport bar.
+    pub(crate) audio_error: Option<String>,
     quit: bool,
 }
 
@@ -107,8 +122,32 @@ impl App {
             sample: 0,
             row_offset: 0,
             sample_offset: 0,
+            playing: false,
+            speed: DEFAULT_SPEED,
+            tempo: DEFAULT_TEMPO,
+            muted: [false; CHANNELS],
+            audio_error: None,
             quit: false,
         }
+    }
+
+    /// Snap the view to the row the replayer is mixing.
+    pub(crate) fn follow(&mut self, order: usize, row: usize, speed: u8, tempo: u8) {
+        self.speed = speed;
+        self.tempo = tempo;
+        let len = self.song_len();
+        self.order_pos = order.min(len.saturating_sub(1));
+        let pattern = usize::from(self.module.order[self.order_pos]);
+        if pattern < self.module.patterns.len() {
+            self.view_pattern = pattern;
+        }
+        self.row = row.min(ROWS - 1);
+    }
+
+    /// Remember that the audio device could not be opened, and leave playback stopped.
+    pub(crate) fn fail_audio(&mut self, message: String) {
+        self.playing = false;
+        self.audio_error = Some(message);
     }
 
     /// Whether the user asked to quit.
@@ -138,6 +177,17 @@ impl App {
             Command::MoveSample(delta) => self.sample = step(self.sample, delta, SAMPLE_COUNT),
             Command::FirstSample => self.sample = 0,
             Command::LastSample => self.sample = SAMPLE_COUNT - 1,
+            Command::TogglePlay => {
+                self.playing = !self.playing;
+                if self.playing {
+                    self.audio_error = None;
+                }
+            }
+            Command::ToggleMute(channel) => {
+                if let Some(muted) = self.muted.get_mut(channel) {
+                    *muted = !*muted;
+                }
+            }
         }
     }
 
@@ -180,6 +230,11 @@ pub fn command_for(focus: Focus, key: Key) -> Option<Command> {
         Key::Char(']') => return Some(Command::MoveOrder(1)),
         Key::Char(',') => return Some(Command::MovePattern(-1)),
         Key::Char('.') => return Some(Command::MovePattern(1)),
+        Key::Char(' ') => return Some(Command::TogglePlay),
+        Key::Char('1') => return Some(Command::ToggleMute(0)),
+        Key::Char('2') => return Some(Command::ToggleMute(1)),
+        Key::Char('3') => return Some(Command::ToggleMute(2)),
+        Key::Char('4') => return Some(Command::ToggleMute(3)),
         _ => {}
     }
     match focus {
@@ -320,6 +375,21 @@ mod tests {
         assert_eq!(command_for(Focus::Pattern, Key::CtrlC), Some(Command::Quit));
         assert_eq!(command_for(Focus::Pattern, Key::Char('x')), None);
         assert_eq!(
+            command_for(Focus::Pattern, Key::Char(' ')),
+            Some(Command::TogglePlay)
+        );
+        assert_eq!(
+            command_for(Focus::Samples, Key::Char('3')),
+            Some(Command::ToggleMute(2))
+        );
+        let mut playing = app;
+        playing.apply(Command::TogglePlay);
+        assert!(playing.playing);
+        playing.apply(Command::ToggleMute(0));
+        assert!(playing.muted[0]);
+        playing.apply(Command::TogglePlay);
+        assert!(!playing.playing);
+        assert_eq!(
             command_for(Focus::Pattern, Key::Char(']')),
             Some(Command::MoveOrder(1))
         );
@@ -332,7 +402,7 @@ mod tests {
             Some(Command::MoveChannel(1))
         );
         assert_eq!(command_for(Focus::Samples, Key::Right), None);
-        let mut quitting = app;
+        let mut quitting = playing;
         quitting.apply(Command::Quit);
         assert!(quitting.should_quit());
     }

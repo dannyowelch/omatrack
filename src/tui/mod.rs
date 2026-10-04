@@ -1,8 +1,8 @@
 //! Terminal UI.
 //!
-//! [`App`] holds the cursor. [`draw`] paints it. [`run`] owns the terminal.
-//! Milestone 3 can add edit commands without changing this split, and milestone
-//! 5 can replace [`Theme`](theme::Theme).
+//! [`App`] holds the cursor. [`draw`] paints it. [`run`] owns the terminal and,
+//! while playback is on, the audio stream. Milestone 3 can add edit commands
+//! without changing this split, and milestone 5 can replace [`Theme`](theme::Theme).
 
 mod app;
 mod render;
@@ -24,12 +24,16 @@ use crossterm::terminal::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::Terminal;
 
+use crate::audio::AudioOutput;
 use crate::error::Error;
 use crate::module::Module;
 
 use self::app::Key as AppKey;
 
-/// Show `module` until the user quits. Playback is not part of this milestone.
+/// Show `module` until the user quits.
+///
+/// Space starts playback from the cursor row. If no output device can be
+/// opened, the transport bar shows the error and the view stays up.
 pub fn run(module: Module) -> Result<(), Error> {
     let _guard = TerminalGuard::enter()?;
     let backend = CrosstermBackend::new(io::stdout());
@@ -37,14 +41,24 @@ pub fn run(module: Module) -> Result<(), Error> {
     terminal.clear().map_err(Error::Terminal)?;
 
     let mut app = App::new(module);
+    let mut audio = AudioOutput::new();
     loop {
+        if app.playing {
+            if let Some(message) = audio.take_error() {
+                audio.stop();
+                app.fail_audio(message);
+            } else if let Some(snapshot) = audio.snapshot() {
+                app.follow(snapshot.order, snapshot.row, snapshot.speed, snapshot.tempo);
+            }
+        }
         terminal
             .draw(|frame| draw(frame, &mut app))
             .map_err(Error::Terminal)?;
-        if event::poll(Duration::from_millis(200)).map_err(Error::Terminal)? {
+        let wait = if app.playing { 20 } else { 200 };
+        if event::poll(Duration::from_millis(wait)).map_err(Error::Terminal)? {
             if let Event::Key(key) = event::read().map_err(Error::Terminal)? {
                 if let Some(command) = map_key(key).and_then(|key| command_for(app.focus, key)) {
-                    app.apply(command);
+                    handle_command(&mut app, &mut audio, command);
                 }
             }
         }
@@ -52,7 +66,29 @@ pub fn run(module: Module) -> Result<(), Error> {
             break;
         }
     }
+    audio.stop();
     Ok(())
+}
+
+fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command) {
+    match command {
+        Command::TogglePlay => {
+            let was_playing = app.playing;
+            app.apply(Command::TogglePlay);
+            if app.playing {
+                if let Err(err) = audio.start(&app.module, app.order_pos, app.row, app.muted) {
+                    app.fail_audio(err.to_string());
+                }
+            } else if was_playing {
+                audio.stop();
+            }
+        }
+        Command::ToggleMute(channel) => {
+            app.apply(Command::ToggleMute(channel));
+            audio.set_mute(channel, app.muted[channel]);
+        }
+        other => app.apply(other),
+    }
 }
 
 fn map_key(key: KeyEvent) -> Option<AppKey> {

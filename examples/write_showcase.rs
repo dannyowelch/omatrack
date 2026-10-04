@@ -1,14 +1,13 @@
-//! Write a tiny original module for trying the viewer.
+//! Write a tiny original module for trying the viewer and the replayer.
 //!
 //! ```text
 //! cargo run --example write_showcase -- showcase.mod
 //! cargo run -- showcase.mod
+//! cargo run -- --render showcase.wav showcase.mod
 //! ```
 //!
 //! The riff is a C major scale, not a copyrighted song. `.mod` files are
 //! gitignored.
-
-use omatrack::{Cell, Module, Tag};
 
 fn main() {
     let path = match std::env::args().nth(1) {
@@ -18,95 +17,8 @@ fn main() {
             std::process::exit(2);
         }
     };
-    if let Err(err) = showcase().save(&path) {
+    if let Err(err) = omatrack::demo::showcase().save(&path) {
         eprintln!("write_showcase: {err}");
         std::process::exit(1);
     }
-}
-
-fn showcase() -> Module {
-    let mut module = Module::new(Tag::Mk);
-    module
-        .set_title("Omatrack")
-        .expect("title fits the 20-byte field");
-    module.song_length = 2;
-    module.restart = 0;
-    module.order[0] = 0;
-    module.order[1] = 1;
-    module.resize_patterns();
-
-    module.samples[0]
-        .set_name("square")
-        .expect("sample name fits");
-    module.samples[0].volume = 64;
-    module.samples[0]
-        .set_data(square_wave(64, 8))
-        .expect("even length");
-
-    module.samples[1]
-        .set_name("tick")
-        .expect("sample name fits");
-    module.samples[1].volume = 48;
-    module.samples[1].finetune_raw = 0x0F; // -1
-    module.samples[1].set_data(decay(32)).expect("even length");
-
-    // C major scale on channel 1, a low C on channel 2, speed on channel 4.
-    let scale = [856, 762, 678, 640, 570, 508, 453, 428];
-    for (step, period) in scale.iter().copied().enumerate() {
-        let row = step * 2;
-        module.patterns[0].rows[row][0] = Cell {
-            sample: 1,
-            period,
-            effect: 0,
-            param: 0,
-        };
-        if step % 2 == 0 {
-            module.patterns[0].rows[row][1] = Cell {
-                sample: 2,
-                period: 856,
-                effect: 0xC,
-                param: 0x30,
-            };
-        }
-    }
-    module.patterns[0].rows[0][3] = Cell {
-        sample: 0,
-        period: 0,
-        effect: 0xF,
-        param: 0x06,
-    };
-    module.patterns[1].rows[0][0] = Cell {
-        sample: 1,
-        period: 428,
-        effect: 0xA,
-        param: 0x0F,
-    };
-    module.patterns[1].rows[16][0] = Cell {
-        sample: 1,
-        period: 214,
-        effect: 0xD,
-        param: 0x00,
-    };
-    module
-}
-
-fn square_wave(len: usize, period: usize) -> Vec<u8> {
-    let mut data = vec![0u8; len];
-    for (index, byte) in data.iter_mut().enumerate() {
-        let high = (index % period) < (period / 2);
-        let amp = 96i16 - (index as i16 / 2);
-        let sample = if high { amp } else { -amp };
-        *byte = sample.clamp(-128, 127) as u8;
-    }
-    data
-}
-
-fn decay(len: usize) -> Vec<u8> {
-    let mut data = vec![0u8; len];
-    for (index, byte) in data.iter_mut().enumerate() {
-        let amp = 100i16 - (index as i16 * 3);
-        let sample = if index % 2 == 0 { amp } else { -amp / 2 };
-        *byte = sample.clamp(-128, 127) as u8;
-    }
-    data
 }
