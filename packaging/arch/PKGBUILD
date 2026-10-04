@@ -1,10 +1,7 @@
 # Maintainer: Omatrack contributors <https://github.com/dannyowelch/omatrack>
 #
-# Builds from the tagged GitHub release tarball. Before packaging a release,
-# replace SKIP with the checksum of that tarball:
-#   curl -fsSL -o omatrack-0.1.0.tar.gz \
-#     https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.1.0.tar.gz
-#   sha256sum omatrack-0.1.0.tar.gz
+# Builds from the tagged GitHub release tarball. sha256sums is the checksum of
+# https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.1.0.tar.gz
 
 pkgname=omatrack
 pkgver=0.1.0
@@ -19,7 +16,7 @@ optdepends=('ghostty: terminal for the desktop entry'
             'alacritty: terminal for the desktop entry'
             'kitty: terminal for the desktop entry')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('e95cef9a23055c1c1557951afeaa7a7fbb40214c81a48879f0fcb7230bca2aad')
 
 prepare() {
   cd "$pkgname-$pkgver"
