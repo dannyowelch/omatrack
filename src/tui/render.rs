@@ -16,7 +16,7 @@ use crate::viz::VizMode;
 use super::app::{App, Focus, Followup, Overlay, TextTarget};
 use super::sample::{FieldKind, FieldPrompt, ImportPrompt, PathKind, PathPrompt};
 use super::theme::{paint, Theme};
-use super::viz::{self, PANEL_HEIGHT, PANEL_MIN_HEIGHT};
+use super::viz;
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
@@ -236,8 +236,12 @@ fn layout(area: Rect, app: &App) -> Option<Regions> {
         });
     }
 
-    let panel = app.viz_mode == VizMode::Panel && area.height >= PANEL_MIN_HEIGHT;
-    let viz_h = if panel { PANEL_HEIGHT } else { 0 };
+    let viz_h = if app.viz_mode == VizMode::Panel {
+        viz::panel_height(area.height)
+    } else {
+        0
+    };
+    let panel = viz_h > 0;
     let upper = Rect {
         x: body.x,
         y: body.y,
@@ -282,7 +286,8 @@ fn header_height(body_h: u16, order_lines: u16) -> u16 {
 
 fn sample_height(body_h: u16, header_h: u16) -> u16 {
     let rest = body_h.saturating_sub(header_h);
-    let max_sample = rest.saturating_sub(6);
+    // Leave the pattern enough rows for a header and a handful of notes.
+    let max_sample = rest.saturating_sub(8);
     8.min(max_sample).max(4).min(rest)
 }
 

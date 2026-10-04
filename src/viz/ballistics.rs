@@ -11,11 +11,17 @@ pub struct Ballistics {
     pub hold: f32,
     /// Fall of the peak mark once `hold` has elapsed.
     ///
-    /// An exponential time constant when [`Self::linear_peak`] is false.
-    /// Seconds to drop from 1 to 0 at a constant rate when it is true.
+    /// An exponential time constant when [`Self::linear_peak`] is false and
+    /// [`Self::peak_gravity`] is 0. Seconds to drop from 1 to 0 at a constant
+    /// rate when [`Self::linear_peak`] is true.
     pub peak_decay: f32,
     /// Drop the peak at a constant rate instead of chasing the input.
     pub linear_peak: bool,
+    /// Downward acceleration after the hold, in display units per second squared.
+    ///
+    /// Above zero, the mark starts from rest when the hold ends and speeds up
+    /// until it meets the bar. Zero keeps the linear or exponential fall.
+    pub peak_gravity: f32,
 }
 
 impl Default for Ballistics {
@@ -33,21 +39,23 @@ impl Ballistics {
             hold: 0.40,
             peak_decay: 0.70,
             linear_peak: false,
+            peak_gravity: 0.0,
         }
     }
 
-    /// Spectrum bars. Attack is a frame or two. Release is a fraction of a
-    /// second, in real time. The cap holds, then drops at a constant rate.
-    ///
-    /// `peak_decay` is the time to fall from full scale to silence, chosen so
-    /// the mark moves about 1.75 rows per second on the four-row panel.
+    /// Spectrum bars. Attack is about one UI frame. Release is a fraction of
+    /// a second. The cap holds briefly, then falls from rest with gravity
+    /// until it meets the smoothed bar.
     pub const fn spectrum() -> Self {
         Self {
-            attack: 0.020,
-            decay: 0.40,
-            hold: 0.80,
-            peak_decay: 4.0 / 1.75,
-            linear_peak: true,
+            attack: 0.015,
+            decay: 0.16,
+            hold: 0.30,
+            peak_decay: 0.70,
+            linear_peak: false,
+            // 0.5 * 3.2 * t^2 covers the full scale in about 0.8 s, and the
+            // first tenth of a second barely moves.
+            peak_gravity: 3.2,
         }
     }
 }
@@ -60,6 +68,7 @@ pub struct Meter {
     /// Highest recent input, held and then released.
     pub peak: f32,
     hold_left: f32,
+    fall_speed: f32,
 }
 
 impl Default for Meter {
@@ -68,6 +77,7 @@ impl Default for Meter {
             level: 0.0,
             peak: 0.0,
             hold_left: 0.0,
+            fall_speed: 0.0,
         }
     }
 }
@@ -89,9 +99,17 @@ impl Meter {
             ballistics.decay
         };
         self.level = approach(self.level, input, dt, tau);
-        advance_peak(&mut self.peak, &mut self.hold_left, input, dt, ballistics);
+        advance_peak(
+            &mut self.peak,
+            &mut self.hold_left,
+            &mut self.fall_speed,
+            input,
+            dt,
+            ballistics,
+        );
         if self.peak < self.level {
             self.peak = self.level;
+            self.fall_speed = 0.0;
         }
     }
 
@@ -118,6 +136,8 @@ pub struct PeakMark {
     /// Held height, `0..=1`.
     pub value: f32,
     hold_left: f32,
+    /// Downward speed in display units per second. Zero while the mark is held.
+    fall_speed: f32,
 }
 
 impl Default for PeakMark {
@@ -125,6 +145,7 @@ impl Default for PeakMark {
         Self {
             value: 0.0,
             hold_left: 0.0,
+            fall_speed: 0.0,
         }
     }
 }
@@ -139,6 +160,7 @@ impl PeakMark {
         advance_peak(
             &mut self.value,
             &mut self.hold_left,
+            &mut self.fall_speed,
             sanitize_unit(input),
             sanitize_dt(dt),
             ballistics,
@@ -185,30 +207,56 @@ fn sanitize_dt(dt: f32) -> f32 {
     }
 }
 
-fn advance_peak(peak: &mut f32, hold_left: &mut f32, input: f32, dt: f32, ballistics: Ballistics) {
+fn advance_peak(
+    peak: &mut f32,
+    hold_left: &mut f32,
+    fall_speed: &mut f32,
+    input: f32,
+    dt: f32,
+    ballistics: Ballistics,
+) {
     let fall_dt = if input >= *peak {
         *peak = input;
         *hold_left = ballistics.hold.max(0.0);
+        *fall_speed = 0.0;
         0.0
     } else if *hold_left > dt {
         *hold_left -= dt;
+        *fall_speed = 0.0;
         0.0
     } else {
         let fall = dt - *hold_left;
         *hold_left = 0.0;
         fall
     };
-    if fall_dt > 0.0 {
-        if ballistics.linear_peak {
-            let seconds = if ballistics.peak_decay.is_finite() {
-                ballistics.peak_decay.max(1.0e-3)
-            } else {
-                1.0e-3
-            };
-            *peak = (*peak - fall_dt / seconds).max(input);
-        } else {
-            *peak = approach(*peak, input, fall_dt, ballistics.peak_decay);
+    if fall_dt <= 0.0 {
+        return;
+    }
+    let gravity = if ballistics.peak_gravity.is_finite() {
+        ballistics.peak_gravity
+    } else {
+        0.0
+    };
+    if gravity > 0.0 {
+        // Semi-implicit Euler: accelerate first, then step. The mark leaves
+        // the hold at rest, so the first frames barely move and later frames
+        // drop faster, until the bar catches it.
+        *fall_speed = (*fall_speed + gravity * fall_dt).max(0.0);
+        *peak = (*peak - *fall_speed * fall_dt).max(input);
+        if *peak <= input + 1.0e-6 {
+            *fall_speed = 0.0;
         }
+    } else if ballistics.linear_peak {
+        let seconds = if ballistics.peak_decay.is_finite() {
+            ballistics.peak_decay.max(1.0e-3)
+        } else {
+            1.0e-3
+        };
+        *peak = (*peak - fall_dt / seconds).max(input);
+        *fall_speed = 0.0;
+    } else {
+        *peak = approach(*peak, input, fall_dt, ballistics.peak_decay);
+        *fall_speed = 0.0;
     }
 }
 
@@ -311,6 +359,7 @@ mod tests {
             hold: 0.30,
             peak_decay: 0.10,
             linear_peak: false,
+            peak_gravity: 0.0,
         };
         let mut meter = Meter::default();
         meter.update(1.0, 0.0, ballistics);
@@ -326,42 +375,56 @@ mod tests {
     }
 
     #[test]
-    fn spectrum_peak_holds_then_falls_at_a_constant_rate() {
+    fn spectrum_peak_holds_then_falls_with_gravity() {
         let ballistics = Ballistics::spectrum();
-        assert!((0.5..=1.0).contains(&ballistics.hold));
-        assert!(ballistics.linear_peak);
+        assert!((0.2..=0.45).contains(&ballistics.hold));
+        assert!(ballistics.peak_gravity > 1.0);
         let mut meter = Meter::default();
         meter.update(1.0, 0.05, ballistics);
-        assert!(meter.level > 0.7, "attack {}", meter.level);
+        assert!(meter.level > 0.9, "attack {}", meter.level);
         assert!((meter.peak - 1.0).abs() < 1.0e-3);
         // The opening frame arms the hold; it does not spend it.
-        let hold_frames = (ballistics.hold / 0.05).round() as usize;
-        for _ in 0..hold_frames {
+        let mut elapsed = 0.05f32;
+        while elapsed + 1.0e-4 < ballistics.hold {
             meter.update(0.0, 0.05, ballistics);
+            elapsed += 0.05;
             assert!(
                 (meter.peak - 1.0).abs() < 1.0e-3,
-                "still holding {}",
+                "still holding at {elapsed}: {}",
                 meter.peak
             );
             assert!(meter.peak + 1.0e-4 >= meter.level);
         }
+        meter.update(0.0, ballistics.hold - elapsed, ballistics);
+        assert!(
+            (meter.peak - 1.0).abs() < 1.0e-3,
+            "boundary frame dropped the cap to {}",
+            meter.peak
+        );
+
+        meter.update(0.0, 0.10, ballistics);
+        let early = 1.0 - meter.peak;
+        assert!(
+            (0.005..0.08).contains(&early),
+            "gravity should start slowly, dropped {early}"
+        );
         let mut previous = meter.peak;
-        let mut dropped = 0.0f32;
-        for _ in 0..10 {
+        for _ in 0..6 {
             meter.update(0.0, 0.05, ballistics);
             assert!(
                 meter.peak <= previous + 1.0e-4,
-                "{previous} -> {}",
+                "fall reversed {previous} -> {}",
                 meter.peak
             );
             assert!(meter.peak + 1.0e-3 >= meter.level);
-            dropped += previous - meter.peak;
             previous = meter.peak;
         }
-        let expected = 0.50 / ballistics.peak_decay;
+        let before = meter.peak;
+        meter.update(0.0, 0.10, ballistics);
+        let later = before - meter.peak;
         assert!(
-            (dropped - expected).abs() < 0.04,
-            "dropped {dropped}, expected about {expected}"
+            later > early * 1.5,
+            "fall should accelerate: first 0.10s dropped {early}, a later 0.10s dropped {later}"
         );
     }
 
@@ -480,13 +543,19 @@ mod tests {
             marks[2].value
         );
 
-        let mut previous = marks[2].value;
-        advance_column_peaks(&mut marks, &floor, 0.50);
-        let expected = 0.50 / ballistics.peak_decay;
-        let dropped = previous - marks[2].value;
+        let held_height = marks[2].value;
+        advance_column_peaks(&mut marks, &floor, 0.10);
+        let early = held_height - marks[2].value;
         assert!(
-            (dropped - expected).abs() < 0.02,
-            "dropped {dropped}, expected {expected} (about 1.75 rows/sec on 4 rows)"
+            (0.005..0.08).contains(&early),
+            "gravity should start slowly, dropped {early}"
+        );
+        let mut previous = marks[2].value;
+        advance_column_peaks(&mut marks, &floor, 0.40);
+        let later = previous - marks[2].value;
+        assert!(
+            later > early * 2.0,
+            "fall should accelerate: 0.10s dropped {early}, the next 0.40s dropped {later}"
         );
         assert!(marks[2].value < previous);
         assert!(marks[2].value + 1.0e-4 >= floor[2]);

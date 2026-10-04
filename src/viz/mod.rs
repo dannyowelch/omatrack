@@ -24,14 +24,21 @@ pub use bands::{
 pub(crate) use bus::VizAccum;
 pub use bus::{VizBus, VizSnapshot};
 pub use column::{
-    sample_series, spectrum_column, ColumnCell, ColumnInk, PEAK_CAP_HIGH, PEAK_CAP_LOW,
+    column_band, sample_series, spectrum_column, ColumnCell, ColumnInk, PEAK_CAP_HIGH, PEAK_CAP_LOW,
 };
 pub use fft::{apply_hann, magnitudes, windowed_magnitudes};
 pub use scope::{draw_scope, ScopeCanvas, INK_CHANNEL, INK_GUIDE, INK_SCOPE};
 pub use state::{channel_unit, meter_curve, VizState, BARS, METER_FLOOR_DB};
 
 /// Samples in one analysis window. Also the FFT length.
-pub const WINDOW: usize = 512;
+///
+/// 2048 points at 44.1 kHz is about 46 ms, long enough that a musical partial
+/// stays in one bin instead of rattling between neighbors every callback.
+pub const WINDOW: usize = 2048;
+
+/// New samples between published windows. The rest of the window overlaps,
+/// so each FFT shares about 35 ms with the one before it.
+pub const HOP: usize = 512;
 
 /// Which visualization is up.
 ///

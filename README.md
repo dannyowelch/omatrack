@@ -67,6 +67,8 @@ cargo run -- --render /tmp/omatrack-showcase.wav /tmp/omatrack-showcase.mod
 
 `--rate`, `--interpolate linear|nearest`, and `--separation 0-100` apply to that render. `100` is hard Amiga panning (channels 1 and 4 left, 2 and 3 right). `0` is mono. The default interpolation is linear.
 
+`OMATRACK_SOFTWARE_AUDIO=1` (also `true` or `yes`) plays inside the tracker without a sound device. The song is mixed on the UI thread and published to the spectrum on the same redraw timer as a live session. Nothing is opened through ALSA, PipeWire, or PulseAudio. It is for a machine with no output device, and for watching the analyzer; `--render` is still what writes a WAV.
+
 `--help` prints the keys. `--version` prints the version. `?` inside the tracker lists them too. The view wants about 76 columns by 20 rows; 80×24 is comfortable. A smaller terminal says so instead of drawing a broken layout. Quitting, and a panic, both leave the terminal in its normal state.
 
 ```text

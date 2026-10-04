@@ -6,7 +6,7 @@
 
 use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, Ordering};
 
-use super::WINDOW;
+use super::{HOP, WINDOW};
 
 /// One published analysis window.
 pub struct VizSnapshot {
@@ -107,25 +107,39 @@ impl Default for VizBus {
 
 /// Callback-local accumulator. It is not shared, so the audio thread never
 /// takes a lock to fill it.
+///
+/// Samples land in a ring of [`WINDOW`] frames. Once the ring is full, every
+/// [`HOP`] new frames publishes the whole ring, oldest sample first. The
+/// scratch buffers are allocated in [`Self::new`], so the callback does not
+/// allocate.
 pub(crate) struct VizAccum {
-    stereo: [i16; WINDOW * 2],
-    frames: usize,
+    ring: Box<[i16]>,
+    /// Frame index of the next write. When the ring is full this is also the
+    /// oldest frame.
+    cursor: usize,
+    filled: usize,
+    since_publish: usize,
     peaks: [u16; 4],
+    linear: Box<[i16]>,
 }
 
 impl VizAccum {
     pub(crate) fn new() -> Self {
         Self {
-            stereo: [0; WINDOW * 2],
-            frames: 0,
+            ring: vec![0; WINDOW * 2].into_boxed_slice(),
+            cursor: 0,
+            filled: 0,
+            since_publish: 0,
             peaks: [0; 4],
+            linear: vec![0; WINDOW * 2].into_boxed_slice(),
         }
     }
 
-    /// Fold `interleaved` into the window and publish each time it fills.
+    /// Fold `interleaved` into the ring and publish each overlapped window.
     ///
     /// `peaks` is the max over this callback. A window that completes here
-    /// reports the max of every callback that contributed to it.
+    /// reports the max of every callback that contributed since the previous
+    /// publish.
     pub(crate) fn push(&mut self, interleaved: &[i16], peaks: [u16; 4], bus: &VizBus, rate: u32) {
         if rate == 0 {
             return;
@@ -134,20 +148,42 @@ impl VizAccum {
             *slot = (*slot).max(peak);
         }
         let total = interleaved.len() / 2;
-        let mut offset = 0;
-        while offset < total {
-            let count = (WINDOW - self.frames).min(total - offset);
-            let dst = self.frames * 2;
-            let src = offset * 2;
-            self.stereo[dst..dst + count * 2].copy_from_slice(&interleaved[src..src + count * 2]);
-            self.frames += count;
-            offset += count;
-            if self.frames == WINDOW {
-                bus.publish(&self.stereo, self.peaks, rate);
-                self.frames = 0;
-                self.peaks = if offset < total { peaks } else { [0; 4] };
+        for frame in 0..total {
+            let dst = self.cursor * 2;
+            let src = frame * 2;
+            if src + 1 >= interleaved.len() {
+                break;
+            }
+            self.ring[dst] = interleaved[src];
+            self.ring[dst + 1] = interleaved[src + 1];
+            self.cursor = (self.cursor + 1) % WINDOW;
+            self.filled = (self.filled + 1).min(WINDOW);
+            self.since_publish += 1;
+            if self.filled == WINDOW && self.since_publish >= HOP {
+                self.publish(bus, rate);
             }
         }
+    }
+
+    fn publish(&mut self, bus: &VizBus, rate: u32) {
+        let oldest = if self.filled == WINDOW {
+            self.cursor
+        } else {
+            0
+        };
+        for index in 0..WINDOW {
+            let src = if index < self.filled {
+                (oldest + index) % WINDOW
+            } else {
+                // Unfilled rings are not published. Keep the slot silent.
+                index
+            };
+            self.linear[index * 2] = self.ring[src * 2];
+            self.linear[index * 2 + 1] = self.ring[src * 2 + 1];
+        }
+        bus.publish(&self.linear, self.peaks, rate);
+        self.since_publish = 0;
+        self.peaks = [0; 4];
     }
 }
 
@@ -176,6 +212,31 @@ mod tests {
         assert_eq!(snap.stereo[1], -1000);
         assert_eq!(snap.stereo[400], 7);
         assert_eq!(snap.peaks, [10, 20, 0, 1]);
+    }
+
+    #[test]
+    fn a_hop_keeps_the_previous_window_and_appends_the_new_samples() {
+        let bus = VizBus::new();
+        let mut accum = VizAccum::new();
+        let mut first = vec![1i16; WINDOW * 2];
+        first[0] = 111;
+        accum.push(&first, [1, 0, 0, 0], &bus, 44_100);
+        let snap = bus.load().expect("first window");
+        assert_eq!(snap.gen, 1);
+        assert_eq!(snap.stereo[0], 111);
+        assert_eq!(snap.stereo[HOP * 2], 1);
+
+        let mut hop = vec![3i16; HOP * 2];
+        hop[0] = 333;
+        accum.push(&hop, [9, 0, 0, 0], &bus, 44_100);
+        let snap = bus.load().expect("overlapped window");
+        assert_eq!(snap.gen, 2);
+        // The oldest hop was overwritten, so the new oldest frame is the one
+        // that used to sit `HOP` frames in.
+        assert_eq!(snap.stereo[0], 1);
+        assert_eq!(snap.stereo[(WINDOW - HOP) * 2], 333);
+        assert_eq!(snap.stereo[(WINDOW - 1) * 2], 3);
+        assert_eq!(snap.peaks[0], 9);
     }
 
     #[test]
