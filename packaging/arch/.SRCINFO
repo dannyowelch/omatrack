@@ -15,6 +15,6 @@ pkgbase = omatrack
 	optdepends = alacritty: terminal for the desktop entry
 	optdepends = kitty: terminal for the desktop entry
 	source = omatrack-0.3.1.tar.gz::https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.3.1.tar.gz
-	sha256sums = SKIP
+	sha256sums = 19a3555fbc22a303fcd337cfa5a8db1837218ce9c12b10199fe6e813b0a0883b
 
 pkgname = omatrack
