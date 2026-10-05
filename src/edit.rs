@@ -592,6 +592,21 @@ impl Editor {
         self.undo_len() != before
     }
 
+    /// Append one blank pattern. The order list is not changed.
+    ///
+    /// More than 64 patterns rewrites an `M.K.` tag to `M!K!`. [`false`] means
+    /// the module already holds 256 patterns. The new pattern is not referenced
+    /// until an order slot is pointed at it.
+    pub fn append_pattern(&mut self, module: &mut Module) -> bool {
+        if module.patterns.len() >= 256 {
+            return false;
+        }
+        self.edit_structure(module, |module| {
+            module.patterns.push(Pattern::empty());
+        });
+        true
+    }
+
     /// Point order position `pos` at a new empty pattern.
     ///
     /// More than 64 patterns rewrites an `M.K.` tag to `M!K!`. [`false`] means
@@ -610,7 +625,10 @@ impl Editor {
         true
     }
 
-    /// Add `delta` to the pattern number at `pos`, staying inside existing patterns.
+    /// Add `delta` to the pattern number at `pos`, staying inside the pattern list.
+    ///
+    /// The list includes patterns no order slot references. Stepping off the
+    /// highest entry does not delete that pattern, and Up can select it again.
     pub fn bump_order_pattern(&mut self, module: &mut Module, pos: usize, delta: i32) -> bool {
         let pos = played_pos(module, pos);
         let current = i32::from(module.order[pos]);
@@ -980,6 +998,8 @@ fn apply_change(module: &mut Module, change: &Change, forward: bool) {
 
 fn normalize(module: &mut Module) {
     module.song_length = module.song_length.clamp(1, 128);
+    // Grow so every order byte has a pattern. Never drop one the order stopped
+    // naming: that pattern is still editable and still selectable.
     module.resize_patterns();
     if module.patterns.len() > 64 && module.tag == Tag::Mk {
         module.tag = Tag::Extended;
@@ -1576,6 +1596,53 @@ mod tests {
         assert!(editor.undo(&mut module));
         assert_eq!(module.order[0], 0);
         assert_eq!(module.tag, Tag::Mk);
+    }
+
+    #[test]
+    fn stepping_off_pattern_16_keeps_it_when_nothing_else_references_it() {
+        let mut module = Module::new(Tag::Mk);
+        module.song_length = 1;
+        module.order[0] = 16;
+        module.resize_patterns();
+        assert_eq!(module.patterns.len(), 17);
+        for index in 0..17 {
+            module.patterns[index].rows[0][0] = Cell {
+                sample: 1,
+                period: 200 + u16::try_from(index).unwrap(),
+                effect: 0,
+                param: u8::try_from(index).unwrap(),
+            };
+        }
+        let pattern_16 = module.patterns[16].clone();
+        let mut editor = Editor::new();
+
+        assert!(editor.bump_order_pattern(&mut module, 0, -1));
+        assert_eq!(module.order[0], 15);
+        assert_eq!(module.patterns.len(), 17);
+        assert_eq!(module.patterns[16], pattern_16);
+        assert_eq!(module.patterns[15].rows[0][0].period, 215);
+        assert!(editor.bump_order_pattern(&mut module, 0, 1));
+        assert_eq!(module.order[0], 16);
+        assert_eq!(module.patterns[16], pattern_16);
+
+        assert!(editor.undo(&mut module));
+        assert_eq!(module.order[0], 15);
+        assert_eq!(module.patterns[16], pattern_16);
+        assert!(editor.redo(&mut module));
+        assert_eq!(module.order[0], 16);
+        assert_eq!(module.patterns.len(), 17);
+        assert_eq!(module.patterns[16].rows[0][0].param, 16);
+
+        let order = module.order;
+        assert!(editor.append_pattern(&mut module));
+        assert_eq!(module.patterns.len(), 18);
+        assert_eq!(module.order, order);
+        assert_eq!(module.patterns[17], Pattern::empty());
+        assert_eq!(module.patterns[16], pattern_16);
+        assert!(editor.undo(&mut module));
+        assert_eq!(module.patterns.len(), 17);
+        assert_eq!(module.order, order);
+        assert_eq!(module.patterns[16], pattern_16);
     }
 
     #[test]

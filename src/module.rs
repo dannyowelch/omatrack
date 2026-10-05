@@ -223,7 +223,11 @@ pub struct Module {
     pub order: [u8; ORDER_LEN],
     /// Format tag. Preserved on write.
     pub tag: Tag,
-    /// Patterns. `patterns.len()` must equal [`Self::required_pattern_count`] to save.
+    /// Patterns `00..len-1`, including ones the order list does not reference.
+    ///
+    /// A `.mod` file can store `0..`[`Self::required_pattern_count`]. A longer
+    /// list is kept in memory. Saving writes the prefix the format can address
+    /// and leaves the rest here.
     pub patterns: Vec<Pattern>,
     /// Bytes after the last sample. Preserved so a round trip matches the input.
     pub trailing: Vec<u8>,
@@ -262,20 +266,22 @@ impl Module {
     }
 
     /// Patterns implied by the order list: highest entry, plus one.
+    ///
+    /// This is the count a `.mod` file stores. It is not the length of
+    /// [`Self::patterns`]: patterns past this index stay in memory.
     pub fn required_pattern_count(&self) -> usize {
         usize::from(self.order.iter().copied().max().unwrap_or(0)) + 1
     }
 
-    /// Grow or shrink [`Self::patterns`] to [`Self::required_pattern_count`].
+    /// Grow [`Self::patterns`] so every order entry has a pattern.
     ///
-    /// New patterns are empty. Shrinking drops patterns the order list no
-    /// longer references.
+    /// New patterns are empty. The list is never shortened. Stepping an order
+    /// slot off the highest pattern must not delete that pattern, and a pattern
+    /// the order list does not reference stays selectable.
     pub fn resize_patterns(&mut self) {
         let needed = self.required_pattern_count();
         if self.patterns.len() < needed {
             self.patterns.resize_with(needed, Pattern::empty);
-        } else {
-            self.patterns.truncate(needed);
         }
     }
 }
@@ -407,6 +413,8 @@ mod tests {
         module.patterns[4].rows[0][0].period = 856;
         module.order[127] = 0;
         module.resize_patterns();
-        assert_eq!(module.patterns.len(), 1);
+        assert_eq!(module.patterns.len(), 5);
+        assert_eq!(module.patterns[4].rows[0][0].period, 856);
+        assert_eq!(module.required_pattern_count(), 1);
     }
 }

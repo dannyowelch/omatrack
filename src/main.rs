@@ -441,8 +441,10 @@ Keys:
     Home/End             first or last row, or sample
     [ ]                  previous / next order position
     , .                  previous / next pattern (view only)
-    Ctrl-Left/Right      pattern number in the current order slot
-                         (Ctrl-Right past the last pattern makes a blank one)
+    Ctrl-Left/Right      show the previous / next pattern (not the order)
+                         (Ctrl-Right past the last pattern adds a blank one
+                         that is not inserted into the order)
+    Song Up/Down         pattern number in the current order slot
 
 Sample list (R still renames; w reverses, so the keys do not clash):
     i / o                import a WAV / export this sample

@@ -28,7 +28,7 @@ const HELP_LINES: &[&str] = &[
     "Ctrl-Q quits anywhere. q quits from browse. Esc: block, then edit, then quit.",
     "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
-    "Arrows move. Tab changes pane. Ctrl-Left/Right edits the slot's pattern.",
+    "Arrows move. Tab changes pane. Ctrl-Left/Right shows another pattern.",
     "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles spectrum, scope, off",
     "Column meters scroll with the pattern. default_view is spectrum, scope, or off.",
     "Alt-1..4 mute a channel while editing. 1-4 mute in browse.",
@@ -42,7 +42,7 @@ const HELP_LINES: &[&str] = &[
     "",
     "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
-    "Order: Up/Down pattern, Ins/Del, +/- length, N new. Ctrl-Right adds one.",
+    "Order: Up/Down edits the slot. N new. Ctrl-Right adds one, not in order.",
     "Ctrl-T title. Samples: R renames. XM/IT read-only. i import WAV, Ctrl-G render.",
     "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
     "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
@@ -439,8 +439,8 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         return;
     }
     let focused = app.focus == Focus::Pattern;
-    let title = if app.editing { "EDIT" } else { "Pattern" };
-    let block = pane(title, focused, theme);
+    let title = pattern_pane_title(app);
+    let block = pane(&title, focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
     let (row_window, meter_rows) = pattern_chrome(inner_h);
@@ -475,7 +475,8 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
 
 fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let focused = app.focus == Focus::Pattern;
-    let block = pane("Pattern", focused, theme);
+    let title = pattern_pane_title(app);
+    let block = pane(&title, focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
     let (row_window, meter_rows) = pattern_chrome(inner_h);
@@ -799,15 +800,32 @@ fn pane(title: &str, focused: bool, theme: Theme) -> Block<'static> {
         .style(theme.fill())
 }
 
-fn pattern_info(app: &App) -> String {
-    let order_pat = usize::from(app.order_pattern());
-    let note = if app.view_pattern != order_pat {
-        format!(" (order has pat {})", fmt_num(order_pat))
+/// Border title for the pattern pane.
+///
+/// `Pattern 15` is the pattern on screen. When that is not the pattern stored
+/// in the current order slot, the title also names the slot.
+fn pattern_pane_title(app: &App) -> String {
+    let stem = if app.editing && app.track.is_none() {
+        "EDIT"
     } else {
-        String::new()
+        "Pattern"
     };
+    let viewed = fmt_num(app.view_pattern);
+    let order_pat = usize::from(app.order_pattern());
+    if app.view_pattern != order_pat {
+        format!(
+            "{stem} {viewed} (slot {} = {})",
+            fmt_num(app.order_pos),
+            fmt_num(order_pat)
+        )
+    } else {
+        format!("{stem} {viewed}")
+    }
+}
+
+fn pattern_info(app: &App) -> String {
     let header = format!(
-        "Pat {}{note}  Pos {} of {}  Row {:02}  Channel {}",
+        "Pat {}  Pos {} of {}  Row {:02}  Channel {}",
         fmt_num(app.view_pattern),
         app.order_pos,
         app.song_len(),
@@ -1069,7 +1087,7 @@ fn transport_text(app: &App) -> String {
 fn status_hints(focus: Focus, editing: bool) -> &'static [&'static str] {
     match (focus, editing) {
         (Focus::Pattern, true) => &[
-            "Ctrl-Left/Right pat",
+            "Ctrl-Left/Right view",
             "Z-M notes",
             "Del clear",
             "Ctrl-Z",
@@ -1079,12 +1097,12 @@ fn status_hints(focus: Focus, editing: bool) -> &'static [&'static str] {
             "?",
         ],
         (Focus::Pattern, false) => &[
-            "Ctrl-Left/Right pat",
+            "Ctrl-Left/Right view",
             "[ ] order",
             "Space play",
             "Ctrl-R",
             "Enter",
-            "Tab focus",
+            "Tab pane",
             "F5",
             "?",
         ],
@@ -1535,7 +1553,7 @@ mod tests {
         assert_has(&screen, "kickdrum");
         assert_has(&screen, "snare");
         assert_has(&screen, "set volume");
-        assert_has(&screen, "Ctrl-Left/Right pat");
+        assert_has(&screen, "Ctrl-Left/Right view");
         assert_has(&screen, "Stop");
         assert_has(&screen, "Spd 06");
         assert_has(&screen, "Tmp 125");
@@ -1583,14 +1601,16 @@ mod tests {
 
         app.apply(command_for(&app, Key::Char('.')).unwrap());
         let screen = text_of(&render(&mut app, 100, 40));
-        assert_has(&screen, "Pat 01 (order has pat 00)");
+        assert_has(&screen, "Pattern 01 (slot 00 = 00)");
+        assert_has(&screen, "Pat 01");
         assert_has(&screen, "Pos 0 of 2");
         assert_has(&screen, "C-2");
 
         app.apply(command_for(&app, Key::Char(']')).unwrap());
         let screen = text_of(&render(&mut app, 100, 40));
         assert_has(&screen, "Pos 1 of 2");
-        assert!(!screen.contains("order has pat"), "{screen}");
+        assert_has(&screen, "Pattern 01");
+        assert!(!screen.contains("(slot"), "{screen}");
 
         app.apply(Command::FirstRow);
         app.apply(command_for(&app, Key::Tab).unwrap());
@@ -1751,8 +1771,8 @@ lighter_background = "#24283b"
         assert_has(&screen, "Ctrl-R rewinds");
         assert_has(&screen, "stopped only moves");
         assert_has(&screen, "r types a note");
-        assert_has(&screen, "Ctrl-Left/Right edits the slot's pattern");
-        assert_has(&screen, "Ctrl-Right adds one");
+        assert_has(&screen, "Ctrl-Left/Right shows another pattern");
+        assert_has(&screen, "Ctrl-Right adds one, not in order");
         assert_has(&screen, "Tab changes channel");
         assert_has(&screen, "Ctrl-Z undo");
         assert_has(&screen, "Z S X D C V G B H N J M");
@@ -1776,7 +1796,7 @@ lighter_background = "#24283b"
         let mut app = demo();
         let pattern = render(&mut app, 80, 24);
         let hint = row_text(&pattern, 23);
-        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+        assert!(hint.contains("Ctrl-Left/Right view"), "{hint}");
         assert!(hint.contains("[ ] order"), "{hint}");
         let status = row_text(&pattern, 22);
         assert!(
@@ -1810,7 +1830,7 @@ lighter_background = "#24283b"
         let status = row_text(&with_message, 22);
         let hint = row_text(&with_message, 23);
         assert!(status.contains("Saved demo.mod"), "{status}");
-        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+        assert!(hint.contains("Ctrl-Left/Right view"), "{hint}");
         assert!(!status.contains("Ctrl-Left"), "{status}");
 
         let long = "status message that is definitely wider than a narrow tracker row and must not wrap into the hint line or the pattern";
@@ -1824,15 +1844,15 @@ lighter_background = "#24283b"
         assert_eq!(hint.chars().count(), 76, "{hint}");
         assert!(status.starts_with("status message"), "{status}");
         assert!(!status.contains("Ctrl-Left"), "{status}");
-        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+        assert!(hint.contains("Ctrl-Left/Right view"), "{hint}");
 
         assert_eq!(
             fit_hints(status_hints(Focus::Pattern, false), 28),
-            "Ctrl-Left/Right pat"
+            "Ctrl-Left/Right view"
         );
         assert_eq!(
             fit_hints(status_hints(Focus::Pattern, false), 30),
-            "Ctrl-Left/Right pat  [ ] order"
+            "Ctrl-Left/Right view"
         );
         assert_eq!(
             fit_hints(status_hints(Focus::Pattern, false), 10),

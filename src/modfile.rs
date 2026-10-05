@@ -110,6 +110,10 @@ impl Module {
     }
 
     /// Write a `.mod` to disk.
+    ///
+    /// Fails when [`Self::patterns`] is shorter or longer than
+    /// [`Self::required_pattern_count`]. Use [`Self::save_stored`] to write the
+    /// prefix a `.mod` can address and keep any higher patterns in memory.
     pub fn save(&self, path: impl AsRef<Path>) -> Result<(), Error> {
         let path = path.as_ref();
         let bytes = write(self)?;
@@ -117,6 +121,38 @@ impl Module {
             .map_err(|source| Error::io(IoKind::Write, path.to_path_buf(), source))?;
         Ok(())
     }
+
+    /// Write the patterns a `.mod` can store, without dropping the rest.
+    ///
+    /// Pattern count in the file is [`Self::required_pattern_count`]
+    /// (`max(order) + 1` over all 128 order bytes). Patterns in that range are
+    /// written even when the played song does not use every one. A pattern
+    /// index above that has no slot in the file. Those patterns stay on
+    /// `self`. The returned index is the first pattern that was not written,
+    /// when the in-memory list is longer than the file can hold.
+    pub fn save_stored(&self, path: impl AsRef<Path>) -> Result<Option<usize>, Error> {
+        let path = path.as_ref();
+        let (bytes, omitted) = stored_bytes(self)?;
+        fs::write(path, bytes)
+            .map_err(|source| Error::io(IoKind::Write, path.to_path_buf(), source))?;
+        Ok(omitted)
+    }
+}
+
+fn stored_bytes(module: &Module) -> Result<(Vec<u8>, Option<usize>), Error> {
+    let expected = module.required_pattern_count();
+    if module.patterns.len() < expected {
+        return Err(Error::PatternCount {
+            expected,
+            actual: module.patterns.len(),
+        });
+    }
+    if module.patterns.len() == expected {
+        return Ok((write(module)?, None));
+    }
+    let mut copy = module.clone();
+    copy.patterns.truncate(expected);
+    Ok((write(&copy)?, Some(expected)))
 }
 
 fn parse(bytes: &[u8]) -> Result<Module, Error> {
