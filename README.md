@@ -28,7 +28,7 @@ A tagged release also attaches `omatrack-x86_64-unknown-linux-gnu` to the GitHub
 
 ### Omarchy / Arch
 
-The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.3.3`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` is `SKIP` until that tag exists; replace it with the checksum of the release tarball after tagging. Install with:
+The package recipe is `packaging/arch/PKGBUILD`. It builds the tagged release tarball (`v0.3.3`, the same version as `Cargo.toml`), not a git checkout. `sha256sums` in the recipe is the checksum of that tarball. Install with:
 
 ```bash
 cd packaging/arch
