@@ -469,7 +469,7 @@ impl Playback {
         voice.fade_rate = instrument.fadeout;
         voice.vol_env_on = instrument.volume_env.enabled;
         voice.pan_env_on = instrument.pan_env.enabled;
-        voice.pitch_env_on = instrument.pitch_env.enabled;
+        voice.pitch_env_on = instrument.pitch_env.enabled && !instrument.pitch_env.filter;
         if let Some(pan) = instrument.pan.or(sample.pan) {
             voice.pan = u16::from(pan);
         }
@@ -976,7 +976,7 @@ impl Playback {
             if voice.pan_env_on {
                 voice.pan_env = advance_envelope(&instrument.pan_env, voice.pan_env, voice.key_off);
             }
-            if voice.pitch_env_on {
+            if voice.pitch_env_on && !instrument.pitch_env.filter {
                 voice.pitch_env =
                     advance_envelope(&instrument.pitch_env, voice.pitch_env, voice.key_off);
             }

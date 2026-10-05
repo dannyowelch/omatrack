@@ -194,6 +194,11 @@ pub struct Envelope {
     pub loop_end: u8,
     /// Nodes in tick order.
     pub points: Vec<EnvPoint>,
+    /// IT pitch-envelope bit 7. The nodes are a filter envelope.
+    ///
+    /// Playback does not apply the filter. The flag is kept so saving the
+    /// file does not turn a filter envelope into a pitch envelope.
+    pub filter: bool,
 }
 
 /// What happens to the previous note when a new one starts on that channel.
@@ -259,6 +264,12 @@ pub struct Instrument {
     pub global_volume: u8,
     /// Default pan, if the instrument names one.
     pub pan: Option<u8>,
+    /// Samples this instrument owns in [`Song::samples`], in file order.
+    ///
+    /// XM nests samples inside the instrument. The count is how many of the
+    /// following samples belong to this one; the key map is rewritten to
+    /// local indexes on save. IT leaves this at 0 and names samples directly.
+    pub owned_samples: u16,
 }
 
 impl Default for Instrument {
@@ -276,6 +287,7 @@ impl Default for Instrument {
             dca: 0,
             global_volume: 128,
             pan: None,
+            owned_samples: 0,
         }
     }
 }
@@ -335,6 +347,42 @@ pub struct Song {
     pub old_effects: bool,
     /// IT "compatible Gxx" flag. Gxx shares memory with Exx/Fxx when set.
     pub compatible_gxx: bool,
+    /// IT `Cmwt` (compatible tracker version). `0` on an XM song.
+    ///
+    /// Saving an IT file writes this back so the reloaded tracker label
+    /// (`IT 0x0214`) matches. A version below `0x0200` selects the old
+    /// instrument layout.
+    pub compat: u16,
+    /// What the loader could not keep. Ignored by equality: a rewritten file
+    /// no longer contains the dropped feature, so a second load has no note.
+    pub load_notes: LoadNotes,
+}
+
+/// Messages from the loader. [`PartialEq`] is always true so song equality
+/// compares the music, not the warning text.
+#[derive(Debug, Clone, Default)]
+pub struct LoadNotes {
+    /// One line per dropped feature.
+    pub lines: Vec<String>,
+}
+
+impl PartialEq for LoadNotes {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for LoadNotes {}
+
+impl LoadNotes {
+    /// Join the lines for a status row. Empty when nothing was dropped.
+    pub fn summary(&self) -> Option<String> {
+        if self.lines.is_empty() {
+            None
+        } else {
+            Some(self.lines.join(" "))
+        }
+    }
 }
 
 impl Song {
@@ -440,5 +488,10 @@ fn it_effect_char(effect: u8) -> char {
     }
 }
 
-/// Shown when a save would overwrite an XM or IT file, or pretend to convert it.
-pub const SAVE_UNSUPPORTED: &str = "Saving XM and IT is not supported yet. .mod is the only write format; converting this song would drop extra channels, instruments, and envelopes, so the original file was left unchanged.";
+/// Extension the Save As picker should use, from the bytes the user is editing.
+pub fn extension_for(format: Format) -> &'static str {
+    match format {
+        Format::Xm => "xm",
+        Format::It => "it",
+    }
+}

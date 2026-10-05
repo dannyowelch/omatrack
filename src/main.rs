@@ -395,12 +395,13 @@ before discarding them.
 
 Opens a 31-sample, 4-channel .mod file (M.K., M!K!, FLT4, or 4CHN),
 or a FastTracker 2 .xm / Impulse Tracker .it file (detected by header).
-XM and IT are played and shown, and are read-only: editing and saving
-those formats is not supported, and the original file is not overwritten.
+XM and IT can be edited and saved. Ctrl-S writes the format of the open
+file. Save As uses the extension (.mod, .xm, or .it) and says when the
+conversion drops something. A bad extension writes nothing.
 The terminal needs about 76×20. Space plays from the cursor. Enter
-toggles edit mode. Ctrl-S writes a .mod, or asks for a path when the
-module is untitled. ? lists every key. If no audio device is available
-the error stays on the transport bar.
+toggles edit mode. Ctrl-S asks for a path when the module is untitled.
+? lists every key. If no audio device is available the error stays on
+the transport bar.
 
     --theme <name>         auto, omarchy, protracker, phosphor, or terminal
     --config <path>        config file (default ~/.config/omatrack/config.toml)

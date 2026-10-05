@@ -76,8 +76,17 @@ pub fn parse(bytes: &[u8]) -> Result<Song, Error> {
     }
 
     let mut samples = Vec::with_capacity(smpnum);
+    let mut stereo_notes = Vec::new();
     for (index, offset) in smp_off.iter().copied().enumerate() {
-        samples.push(parse_sample(bytes, offset, index, cmwt)?);
+        let (sample, stereo) = parse_sample(bytes, offset, index, cmwt)?;
+        if stereo {
+            stereo_notes.push(format!(
+                "Sample {} (\"{}\") was stereo and was mixed to mono. Saving writes the mono sample.",
+                index + 1,
+                sample.name
+            ));
+        }
+        samples.push(sample);
     }
     let instrument_mode = flags & 0x04 != 0;
     let mut instruments = Vec::with_capacity(insnum);
@@ -109,10 +118,44 @@ pub fn parse(bytes: &[u8]) -> Result<Song, Error> {
 
     let linear = flags & 0x08 != 0;
     let channels = channel_span(&patterns, &initial_mute);
+    let mut load_notes = Vec::new();
+    if flags & 0xC0 != 0 {
+        load_notes.push(
+            "MIDI pitch and embedded MIDI configuration were not kept and will not be written back."
+                .to_string(),
+        );
+    }
+    let special = u16_at(bytes, 0x2E);
+    if special & 0x01 != 0 {
+        load_notes.push("The song message was not kept and will not be written back.".to_string());
+    }
+    if (channels..MAX_CHANNELS).any(|index| {
+        let pan = bytes[0x40 + index];
+        let vol = bytes[0x80 + index];
+        let raw = pan & 0x7F;
+        pan & 0x80 != 0 || vol != 64 || (raw != 32 && raw != 0)
+    }) {
+        load_notes.push(format!(
+            "Channel pan, mute, and volume after channel {channels} were not kept."
+        ));
+    }
     let initial_pan: Vec<u8> = initial_pan.into_iter().take(channels).collect();
     let initial_mute: Vec<bool> = initial_mute.into_iter().take(channels).collect();
     let initial_channel_volume: Vec<u8> =
         initial_channel_volume.into_iter().take(channels).collect();
+    load_notes.extend(stereo_notes);
+    if instruments
+        .iter()
+        .any(|instrument| instrument.pitch_env.filter)
+    {
+        load_notes.push("A filter envelope was kept in the file and is not played.".to_string());
+    }
+    if !instrument_mode {
+        load_notes.push(
+            "Sample mode was loaded as instruments (one per sample) and is saved that way."
+                .to_string(),
+        );
+    }
     Ok(Song {
         title,
         tracker: format!("IT {cmwt:#06x}"),
@@ -134,6 +177,8 @@ pub fn parse(bytes: &[u8]) -> Result<Song, Error> {
         instrument_mode: true,
         old_effects: flags & 0x10 != 0,
         compatible_gxx: flags & 0x20 != 0,
+        compat: cmwt,
+        load_notes: super::song::LoadNotes { lines: load_notes },
     })
 }
 
@@ -305,9 +350,10 @@ fn parse_instrument(
     let vol = read_it_envelope(bytes, at + 0x130)?;
     let pan_env = read_it_envelope(bytes, at + 0x182)?;
     let mut pitch = read_it_envelope(bytes, at + 0x1D4)?;
-    // Bit 7 of the pitch envelope flags means "this is a filter envelope".
+    // Bit 7 means the nodes are a filter envelope. Keep them, and keep the
+    // flag, but playback will not treat the envelope as pitch.
     if pitch_is_filter(bytes, at + 0x1D4) {
-        pitch.enabled = false;
+        pitch.filter = true;
     }
     Ok(Instrument {
         name,
@@ -383,12 +429,18 @@ fn read_it_envelope(bytes: &[u8], at: usize) -> Result<Envelope, Error> {
         sustain_point: sus_start.min(last),
         sustain_end: sus_end.min(last),
         points,
+        filter: false,
     })
 }
 
-fn parse_sample(bytes: &[u8], offset: u32, index: usize, cmwt: u16) -> Result<Sample, Error> {
+fn parse_sample(
+    bytes: &[u8],
+    offset: u32,
+    index: usize,
+    cmwt: u16,
+) -> Result<(Sample, bool), Error> {
     if offset == 0 {
-        return Ok(Sample::default());
+        return Ok((Sample::default(), false));
     }
     let at = offset as usize;
     if at + 0x50 > bytes.len() {
@@ -434,6 +486,7 @@ fn parse_sample(bytes: &[u8], offset: u32, index: usize, cmwt: u16) -> Result<Sa
     } else {
         None
     };
+    let mixed_stereo = stereo && has_data && !compressed;
     let pcm = if !has_data {
         Vec::new()
     } else if compressed && stereo {
@@ -461,7 +514,7 @@ fn parse_sample(bytes: &[u8], offset: u32, index: usize, cmwt: u16) -> Result<Sa
         sus_end,
         pcm.len(),
     );
-    Ok(Sample {
+    let sample = Sample {
         name,
         pcm,
         bits: if bits16 { 16 } else { 8 },
@@ -478,7 +531,8 @@ fn parse_sample(bytes: &[u8], offset: u32, index: usize, cmwt: u16) -> Result<Sa
         sustain_end,
         sustain_kind,
         vibrato,
-    })
+    };
+    Ok((sample, mixed_stereo))
 }
 
 fn loop_pair(on: bool, ping: bool, start: u32, end: u32, len: usize) -> (u32, u32, LoopKind) {
@@ -863,9 +917,477 @@ fn latin1(bytes: &[u8]) -> String {
         .to_string()
 }
 
+/// Encode `song` as an Impulse Tracker module.
+///
+/// Samples are stored uncompressed. A reload matches what [`parse`] kept,
+/// including envelopes and the filter-envelope flag. `warnings` names fields
+/// the format cannot store.
+pub(crate) fn write(song: &Song) -> Result<(Vec<u8>, Vec<String>), Error> {
+    let mut warnings = Vec::new();
+    if song.patterns.len() > MAX_PATTERNS
+        || song.instruments.len() > MAX_INSTRUMENTS
+        || song.samples.len() > MAX_SAMPLES
+    {
+        return Err(Error::Malformed(format!(
+            "IT stores at most {MAX_PATTERNS} patterns, {MAX_INSTRUMENTS} instruments, and {MAX_SAMPLES} samples. Nothing was written."
+        )));
+    }
+    let mut orders = song.orders.clone();
+    if orders.is_empty() {
+        orders.push(0);
+        warnings.push(
+            "The order list was empty. One order pointing at pattern 0 was written.".to_string(),
+        );
+    }
+    if orders.len() > 256 {
+        return Err(Error::Malformed(
+            "IT stores at most 256 orders. Nothing was written.".to_string(),
+        ));
+    }
+    if song.restart != 0 {
+        warnings.push("Restart position is not part of an IT file and was left out.".to_string());
+    }
+    let cmwt = if song.compat == 0 {
+        0x0214
+    } else {
+        song.compat
+    };
+
+    let ordnum = orders.len();
+    let insnum = song.instruments.len();
+    let smpnum = song.samples.len();
+    let patnum = song.patterns.len();
+    let header_len = 0xC0 + ordnum + (insnum + smpnum + patnum) * 4;
+    let mut out = vec![0u8; header_len];
+    out[0..4].copy_from_slice(b"IMPM");
+    write_text(&mut out[4..30], &song.title);
+    put_u16(&mut out, 0x20, ordnum as u16);
+    put_u16(&mut out, 0x22, insnum as u16);
+    put_u16(&mut out, 0x24, smpnum as u16);
+    put_u16(&mut out, 0x26, patnum as u16);
+    put_u16(&mut out, 0x28, cmwt);
+    put_u16(&mut out, 0x2A, cmwt);
+    put_u16(&mut out, 0x2C, it_flags(song));
+    out[0x30] = u8::try_from(song.initial_global_volume.min(128)).unwrap_or(128);
+    out[0x31] = 48;
+    out[0x32] = song.initial_speed.max(1);
+    out[0x33] = song.initial_tempo.max(32);
+    out[0x34] = 128;
+    let mut pan_quantized = false;
+    for channel in 0..MAX_CHANNELS {
+        let (pan, exact) = if channel < song.initial_pan.len() {
+            let mute = song.initial_mute.get(channel).copied().unwrap_or(false);
+            channel_pan_byte(song.initial_pan[channel], mute)
+        } else {
+            (32, true)
+        };
+        if !exact {
+            pan_quantized = true;
+        }
+        out[0x40 + channel] = pan;
+        let volume = if channel < song.initial_channel_volume.len() {
+            song.initial_channel_volume[channel].min(64)
+        } else {
+            64
+        };
+        out[0x80 + channel] = volume;
+    }
+    if pan_quantized {
+        warnings.push(
+            "Channel panning was quantized to the IT scale (0..=64, or surround).".to_string(),
+        );
+    }
+    out[0xC0..0xC0 + ordnum].copy_from_slice(&orders);
+
+    let ins_table = 0xC0 + ordnum;
+    let smp_table = ins_table + insnum * 4;
+    let pat_table = smp_table + smpnum * 4;
+
+    for (index, instrument) in song.instruments.iter().enumerate() {
+        if instrument == &Instrument::default() {
+            continue;
+        }
+        let blob = instrument_bytes(instrument, cmwt, index, &mut warnings);
+        let at = out.len() as u32;
+        put_u32(&mut out, ins_table + index * 4, at);
+        out.extend_from_slice(&blob);
+    }
+    for (index, sample) in song.samples.iter().enumerate() {
+        if sample == &Sample::default() {
+            continue;
+        }
+        let offset = out.len() as u32;
+        let (header, data) = sample_bytes(sample, offset, &mut warnings);
+        put_u32(&mut out, smp_table + index * 4, offset);
+        out.extend_from_slice(&header);
+        out.extend_from_slice(&data);
+    }
+    for (index, pattern) in song.patterns.iter().enumerate() {
+        let Some(packed) = pack_pattern(pattern, index, &mut warnings)? else {
+            continue;
+        };
+        let at = out.len() as u32;
+        put_u32(&mut out, pat_table + index * 4, at);
+        put_u16_vec(&mut out, packed.len() as u16);
+        put_u16_vec(&mut out, pattern_rows(pattern, index, &mut warnings));
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        out.extend_from_slice(&packed);
+    }
+    Ok((out, warnings))
+}
+
+fn it_flags(song: &Song) -> u16 {
+    let mut flags = 0x0001 | 0x0004;
+    if song.linear {
+        flags |= 0x0008;
+    }
+    if song.old_effects {
+        flags |= 0x0010;
+    }
+    if song.compatible_gxx {
+        flags |= 0x0020;
+    }
+    flags
+}
+
+/// IT channel pan byte. `100` is surround, which the loader maps back to 128.
+pub(crate) fn channel_pan_byte(model: u8, mute: bool) -> (u8, bool) {
+    let (raw, exact) = if model == 128 {
+        (100, true)
+    } else {
+        linear_pan(model)
+    };
+    let byte = raw | u8::from(mute) << 7;
+    (byte, exact)
+}
+
+/// Sample or instrument pan, without the surround code (those fields have no
+/// 100 = surround case). `(raw, exact)`.
+pub(crate) fn linear_pan(model: u8) -> (u8, bool) {
+    for raw in 0..=64 {
+        if (u16::from(raw) * 255 / 64) as u8 == model {
+            return (raw, true);
+        }
+    }
+    let raw = (0..=64).min_by_key(|raw| ((u16::from(*raw) * 255 / 64) as u8).abs_diff(model));
+    (raw.unwrap_or(32), false)
+}
+
+fn pattern_rows(pattern: &Pattern, index: usize, warnings: &mut Vec<String>) -> u16 {
+    let rows = pattern.row_count();
+    if rows == 0 {
+        warnings.push(format!(
+            "Pattern {index} had no rows. One empty row was written."
+        ));
+        1
+    } else if rows > MAX_ROWS {
+        warnings.push(format!(
+            "Pattern {index} has more than {MAX_ROWS} rows. IT keeps the first {MAX_ROWS}."
+        ));
+        MAX_ROWS as u16
+    } else {
+        rows as u16
+    }
+}
+
+fn pack_pattern(
+    pattern: &Pattern,
+    index: usize,
+    warnings: &mut Vec<String>,
+) -> Result<Option<Vec<u8>>, Error> {
+    let rows = pattern.row_count().clamp(1, MAX_ROWS);
+    let empty = pattern
+        .rows
+        .iter()
+        .take(rows)
+        .all(|row| row.iter().all(cell_empty));
+    if empty && pattern.row_count() == 64 {
+        return Ok(None);
+    }
+    let mut packed = Vec::new();
+    let mut odd_note = false;
+    let mut wide = false;
+    for row in pattern.rows.iter().take(rows) {
+        for (channel, cell) in row.iter().enumerate() {
+            if cell_empty(cell) {
+                continue;
+            }
+            if channel >= MAX_CHANNELS {
+                wide = true;
+                continue;
+            }
+            let mut mask = 0u8;
+            let mut body = Vec::new();
+            if cell.note != 0 {
+                if let Some(note) = it_note(cell.note) {
+                    mask |= 0x01;
+                    body.push(note);
+                } else {
+                    odd_note = true;
+                }
+            }
+            if cell.instrument != 0 {
+                mask |= 0x02;
+                body.push(cell.instrument);
+            }
+            if cell.has_volume {
+                mask |= 0x04;
+                body.push(cell.volume);
+            }
+            if cell.effect != 0 || cell.param != 0 {
+                mask |= 0x08;
+                body.push(cell.effect);
+                body.push(cell.param);
+            }
+            if mask == 0 {
+                continue;
+            }
+            packed.push((channel as u8 + 1) | 0x80);
+            packed.push(mask);
+            packed.extend(body);
+        }
+        packed.push(0);
+    }
+    if odd_note {
+        warnings.push(format!(
+            "Pattern {index} has a note IT cannot store. That note was left out."
+        ));
+    }
+    if wide {
+        warnings.push(format!(
+            "Pattern {index} uses more than {MAX_CHANNELS} channels. The extra channels were left out."
+        ));
+    }
+    if packed.len() > u16::MAX as usize {
+        return Err(Error::Malformed(format!(
+            "Pattern {index} does not fit in an IT file (packed data is larger than 65535 bytes). Nothing was written."
+        )));
+    }
+    Ok(Some(packed))
+}
+
+fn cell_empty(cell: &Cell) -> bool {
+    cell.note == 0
+        && cell.instrument == 0
+        && !cell.has_volume
+        && cell.effect == 0
+        && cell.param == 0
+}
+
+fn it_note(note: u8) -> Option<u8> {
+    match note {
+        NOTE_OFF => Some(255),
+        NOTE_CUT => Some(254),
+        NOTE_FADE => Some(253),
+        1..=120 => Some(note - 1),
+        _ => None,
+    }
+}
+
+fn instrument_bytes(
+    instrument: &Instrument,
+    cmwt: u16,
+    index: usize,
+    warnings: &mut Vec<String>,
+) -> Vec<u8> {
+    if cmwt < 0x200 {
+        if instrument.volume_env.enabled
+            || instrument.pan_env.enabled
+            || instrument.pitch_env.enabled
+            || instrument.fadeout != 0
+        {
+            warnings.push(format!(
+                "Instrument {} uses envelopes, but compatible version {cmwt:#06x} stores the old instrument layout without them.",
+                index + 1
+            ));
+        }
+        return old_instrument(instrument);
+    }
+    let mut bytes = vec![0u8; 0x1D4 + 82];
+    bytes[0..4].copy_from_slice(b"IMPI");
+    bytes[0x11] = match instrument.nna {
+        NewNoteAction::Continue => 1,
+        NewNoteAction::Off => 2,
+        NewNoteAction::Fade => 3,
+        NewNoteAction::Cut => 0,
+    };
+    bytes[0x12] = instrument.dct;
+    bytes[0x13] = instrument.dca;
+    bytes[0x14..0x16].copy_from_slice(&instrument.fadeout.to_le_bytes());
+    let gbv = instrument.global_volume.min(128);
+    bytes[0x18] = if gbv == 0 { 128 } else { gbv };
+    bytes[0x19] = instrument_dfp(instrument.pan);
+    write_text(&mut bytes[0x20..0x3A], &instrument.name);
+    let mut sample_clipped = false;
+    for note in 0..120 {
+        let key = instrument.keys.get(note).copied().unwrap_or_default();
+        let at = 0x40 + note * 2;
+        bytes[at] = key.note.min(119);
+        bytes[at + 1] = u8::try_from(key.sample.min(255)).unwrap_or(255);
+        if key.sample > 255 {
+            sample_clipped = true;
+        }
+    }
+    if sample_clipped {
+        warnings.push(format!(
+            "Instrument {} maps a note to a sample above 255. IT stores 255.",
+            index + 1
+        ));
+    }
+    if instrument.volume_env.points.len() > 25
+        || instrument.pan_env.points.len() > 25
+        || instrument.pitch_env.points.len() > 25
+    {
+        warnings.push(format!(
+            "Instrument {} has an envelope with more than 25 nodes. IT keeps 25.",
+            index + 1
+        ));
+    }
+    write_envelope(&mut bytes[0x130..0x130 + 81], &instrument.volume_env);
+    write_envelope(&mut bytes[0x182..0x182 + 81], &instrument.pan_env);
+    write_envelope(&mut bytes[0x1D4..0x1D4 + 81], &instrument.pitch_env);
+    bytes
+}
+
+fn old_instrument(instrument: &Instrument) -> Vec<u8> {
+    let mut bytes = vec![0u8; 0x120];
+    bytes[0..4].copy_from_slice(b"IMPI");
+    write_text(&mut bytes[0x14..0x2E], &instrument.name);
+    for note in 0..120 {
+        let key = instrument.keys.get(note).copied().unwrap_or_default();
+        let at = 0x30 + note * 2;
+        bytes[at] = key.note.min(119);
+        bytes[at + 1] = u8::try_from(key.sample.min(255)).unwrap_or(255);
+    }
+    bytes
+}
+
+fn instrument_dfp(pan: Option<u8>) -> u8 {
+    match pan {
+        None => 0x80,
+        Some(model) => linear_pan(model).0.min(64),
+    }
+}
+
+fn write_envelope(dest: &mut [u8], envelope: &Envelope) {
+    let count = envelope.points.len().min(25);
+    let mut flags = 0u8;
+    if envelope.enabled && count > 0 {
+        flags |= 0x01;
+    }
+    if envelope.loop_on && count > 1 {
+        flags |= 0x02;
+    }
+    if envelope.sustain && count > 0 {
+        flags |= 0x04;
+    }
+    if envelope.filter {
+        flags |= 0x80;
+    }
+    dest[0] = flags;
+    dest[1] = count as u8;
+    dest[2] = envelope.loop_start;
+    dest[3] = envelope.loop_end;
+    dest[4] = envelope.sustain_point;
+    dest[5] = envelope.sustain_end;
+    for (index, (tick, value)) in envelope.points.iter().take(25).enumerate() {
+        let at = 6 + index * 3;
+        dest[at] = *value;
+        dest[at + 1..at + 3].copy_from_slice(&tick.to_le_bytes());
+    }
+}
+
+fn sample_bytes(sample: &Sample, offset: u32, warnings: &mut Vec<String>) -> (Vec<u8>, Vec<u8>) {
+    let clean8 = sample.pcm.iter().all(|frame| frame & 0x00FF == 0);
+    let bits16 = sample.bits == 16 || !clean8;
+    if sample.bits != 16 && !clean8 {
+        warnings.push(format!(
+            "Sample \"{}\" has 16-bit data and was stored as 16-bit.",
+            sample.name
+        ));
+    }
+    let data = if bits16 {
+        let mut raw = Vec::with_capacity(sample.pcm.len() * 2);
+        for frame in &sample.pcm {
+            raw.extend_from_slice(&frame.to_le_bytes());
+        }
+        raw
+    } else {
+        sample.pcm.iter().map(|frame| (*frame >> 8) as u8).collect()
+    };
+    let mut header = vec![0u8; 0x50];
+    header[0..4].copy_from_slice(b"IMPS");
+    let gvl = sample.global_volume.min(64);
+    header[0x11] = if gvl == 0 { 64 } else { gvl };
+    header[0x13] = sample.volume.min(64);
+    write_text(&mut header[0x14..0x2E], &sample.name);
+    header[0x2E] = if bits16 { 0x01 | 0x02 } else { 0x01 };
+    header[0x2F] = match sample.pan {
+        Some(model) => linear_pan(model).0.min(64) | 0x80,
+        None => 0,
+    };
+    let frames = data.len() / if bits16 { 2 } else { 1 };
+    header[0x30..0x34].copy_from_slice(&(frames as u32).to_le_bytes());
+    let (loop_on, ping) = loop_flags(sample.loop_kind, sample.loop_start, sample.loop_end, frames);
+    let (sus_on, sus_ping) = loop_flags(
+        sample.sustain_kind,
+        sample.sustain_start,
+        sample.sustain_end,
+        frames,
+    );
+    if loop_on {
+        header[0x34..0x38].copy_from_slice(&sample.loop_start.to_le_bytes());
+        header[0x38..0x3C].copy_from_slice(&sample.loop_end.to_le_bytes());
+    }
+    let c5 = if sample.c5_speed == 0 {
+        8363
+    } else {
+        sample.c5_speed
+    };
+    header[0x3C..0x40].copy_from_slice(&c5.to_le_bytes());
+    if sus_on {
+        header[0x40..0x44].copy_from_slice(&sample.sustain_start.to_le_bytes());
+        header[0x44..0x48].copy_from_slice(&sample.sustain_end.to_le_bytes());
+    }
+    header[0x4C] = sample.vibrato.rate;
+    header[0x4D] = sample.vibrato.depth;
+    header[0x4E] = sample.vibrato.sweep;
+    header[0x4F] = sample.vibrato.kind;
+    let mut flags = 0u8;
+    if !data.is_empty() {
+        flags |= 0x01;
+        let pointer = offset + 0x50;
+        header[0x48..0x4C].copy_from_slice(&pointer.to_le_bytes());
+    }
+    if bits16 {
+        flags |= 0x02;
+    }
+    if loop_on {
+        flags |= 0x10;
+    }
+    if sus_on {
+        flags |= 0x20;
+    }
+    if ping {
+        flags |= 0x40;
+    }
+    if sus_ping {
+        flags |= 0x80;
+    }
+    header[0x12] = flags;
+    (header, data)
+}
+
+fn loop_flags(kind: LoopKind, start: u32, end: u32, frames: usize) -> (bool, bool) {
+    if kind == LoopKind::None || end <= start || frames == 0 {
+        return (false, false);
+    }
+    (true, kind == LoopKind::PingPong)
+}
+
 /// IT channel count is fixed at 64 in the header. Songs still only *use* the
-/// channels that appear. [`used_channels`] reports the highest channel with a
-/// cell, pan, or volume, at least 1 and at most 64.
+/// channels that appear. [`channel_span`] reports the highest channel with a
+/// cell or a mute, at least 1 and at most 64.
 fn channel_span(patterns: &[Pattern], muted: &[bool]) -> usize {
     let mut highest = 1usize;
     for pattern in patterns {
@@ -888,4 +1410,25 @@ fn channel_span(patterns: &[Pattern], muted: &[bool]) -> usize {
         }
     }
     highest.clamp(1, MAX_CHANNELS)
+}
+
+fn write_text(dest: &mut [u8], text: &str) {
+    for (slot, ch) in dest.iter_mut().zip(text.chars()) {
+        let value = u32::from(ch);
+        if (0x20..0x7F).contains(&value) || (0xA0..=0xFF).contains(&value) {
+            *slot = value as u8;
+        }
+    }
+}
+
+fn put_u16(bytes: &mut [u8], at: usize, value: u16) {
+    bytes[at..at + 2].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u32(bytes: &mut [u8], at: usize, value: u32) {
+    bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn put_u16_vec(out: &mut Vec<u8>, value: u16) {
+    out.extend_from_slice(&value.to_le_bytes());
 }

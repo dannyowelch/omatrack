@@ -7,6 +7,259 @@ use omatrack::track::{self, Format};
 use omatrack::{open_bytes, Opened};
 
 #[test]
+fn synthetic_modules_round_trip() {
+    for bytes in [
+        minimal_xm(4),
+        minimal_xm(8),
+        minimal_it(false),
+        minimal_it(true),
+    ] {
+        assert_round_trip(&bytes);
+    }
+}
+
+#[test]
+fn cc0_fixtures_round_trip() {
+    for path in [
+        "tests/data/blue_intermission_congusbongus_CC0.xm",
+        "tests/data/jingle_bells_drmccoy_CC0.it",
+    ] {
+        assert_round_trip(&read_fixture(path));
+    }
+    for path in [
+        "tests/data/long_rows_synthetic.xm",
+        "tests/data/long_rows_synthetic.it",
+    ] {
+        let bytes = std::fs::read(path).unwrap_or_else(|err| panic!("{path}: {err}"));
+        assert_round_trip(&bytes);
+    }
+}
+
+#[test]
+fn saved_headers_match_the_format_and_playback_stays_close() {
+    let xm_bytes = read_fixture("tests/data/blue_intermission_congusbongus_CC0.xm");
+    let it_bytes = read_fixture("tests/data/jingle_bells_drmccoy_CC0.it");
+    for (bytes, magic) in [
+        (&xm_bytes, &b"Extended Module: "[..]),
+        (&it_bytes, &b"IMPM"[..]),
+    ] {
+        let song = load_track(bytes);
+        let original = render_pcm(&song, 1.0);
+        let (written, warnings) = omatrack::track::save_song(&song).expect("write");
+        assert!(
+            written.starts_with(magic),
+            "header {:?}",
+            &written[..magic.len()]
+        );
+        assert!(
+            warnings.iter().all(|line| !line.contains("not written")),
+            "unreferenced-pattern warning on a native save: {warnings:?}"
+        );
+        let again = load_track(&written);
+        let replay = render_pcm(&again, 1.0);
+        let frames = original.len().min(replay.len());
+        assert!(frames > 8_000, "frames {frames}");
+        let diff = original
+            .iter()
+            .zip(&replay)
+            .map(|(left, right)| left.abs_diff(*right))
+            .max()
+            .unwrap_or(0);
+        assert_eq!(diff, 0, "render diverged by {diff}");
+    }
+    assert_eq!(xm_bytes[37], 0x1A);
+    let (xm_written, _) = omatrack::track::save_song(&load_track(&xm_bytes)).unwrap();
+    assert_eq!(xm_written[37], 0x1A);
+    let version = u16::from_le_bytes([xm_written[58], xm_written[59]]);
+    assert_eq!(version, 0x0104);
+    let (it_written, _) = omatrack::track::save_song(&load_track(&it_bytes)).unwrap();
+    assert!(it_written.windows(4).any(|window| window == b"IMPI"));
+    assert!(it_written.windows(4).any(|window| window == b"IMPS"));
+}
+
+#[test]
+fn an_edit_and_an_unreferenced_pattern_survive_a_save() {
+    let mut song = load_track(&minimal_xm(4));
+    song.patterns[0].rows[3][1].note = 37;
+    song.patterns[0].rows[3][1].instrument = 1;
+    song.patterns[0].rows[3][1].volume = 0x32;
+    song.patterns[0].rows[3][1].has_volume = true;
+    song.patterns.push(omatrack::track::Pattern::empty(64, 4));
+    let extra = song.patterns.len() - 1;
+    song.patterns[extra].rows[0][0].note = 49;
+    let (written, warnings) = omatrack::track::save_song(&song).unwrap();
+    assert!(
+        warnings.iter().all(|line| !line.contains("not written")),
+        "{warnings:?}"
+    );
+    let again = load_track(&written);
+    assert_eq!(again.patterns[0].rows[3][1].note, 37);
+    assert_eq!(again.patterns[0].rows[3][1].instrument, 1);
+    assert_eq!(again.patterns[0].rows[3][1].volume, 0x32);
+    assert!(again.patterns[0].rows[3][1].has_volume);
+    assert_eq!(again.patterns[extra].rows[0][0].note, 49);
+    assert!(again
+        .orders
+        .iter()
+        .all(|order| usize::from(*order) != extra));
+}
+
+#[test]
+fn converting_to_mod_warns_and_leaves_the_song_argument_intact() {
+    let song = load_track(&minimal_xm(8));
+    let saved =
+        omatrack::track::save_song_as(&song, omatrack::track::SaveFormat::Mod).expect("convert");
+    assert!(
+        saved.warnings.iter().any(|line| line.contains("channel")),
+        "{:?}",
+        saved.warnings
+    );
+    assert_eq!(song.channels, 8);
+    match omatrack::open_bytes(&saved.bytes).unwrap() {
+        omatrack::Opened::Mod(module) => {
+            assert!(!module.patterns.is_empty());
+            assert_eq!(module.patterns[0].rows[0].len(), 4);
+        }
+        omatrack::Opened::Track(_) => panic!("converted file was not a module"),
+    }
+    let _ = omatrack::track::Playback::new(PlayerConfig::default());
+    let converted = match omatrack::open_bytes(&saved.bytes).unwrap() {
+        omatrack::Opened::Mod(module) => module,
+        omatrack::Opened::Track(_) => unreachable!(),
+    };
+    let mut playback = omatrack::player::Playback::new(PlayerConfig::default());
+    playback.start(&converted, 0, 0);
+    let mut buf = vec![0i16; 4_000];
+    playback.render(&converted, &mut buf);
+}
+
+#[test]
+fn a_module_saved_as_xm_loads_and_renders() {
+    let bytes = std::fs::read("tests/data/fx-poly1_k0wax_CC0.mod").unwrap();
+    let module = match omatrack::open_bytes(&bytes).unwrap() {
+        omatrack::Opened::Mod(module) => module,
+        omatrack::Opened::Track(_) => panic!("fixture is a module"),
+    };
+    let saved = omatrack::track::save_module(&module, omatrack::track::SaveFormat::Xm).expect("xm");
+    assert!(saved.bytes.starts_with(b"Extended Module: "));
+    let song = load_track(&saved.bytes);
+    assert_eq!(song.format, Format::Xm);
+    assert_eq!(song.channels, 4);
+    let stats = render_stats(&song, 1.0);
+    assert!(stats.frames > 1_000, "{}", stats.frames);
+}
+
+fn render_pcm(song: &omatrack::Song, seconds: f64) -> Vec<i16> {
+    let mut playback = track::Playback::new(PlayerConfig::default());
+    playback.set_stop_on_loop(true);
+    playback.start(song, 0, 0);
+    let max = (seconds * f64::from(DEFAULT_SAMPLE_RATE)) as usize;
+    let mut pcm = Vec::new();
+    while pcm.len() / 2 < max {
+        let mut buf = vec![0i16; 2048 * 2];
+        let wrote = playback.render(song, &mut buf);
+        if wrote == 0 {
+            break;
+        }
+        pcm.extend_from_slice(&buf[..wrote * 2]);
+    }
+    pcm
+}
+
+fn assert_round_trip(bytes: &[u8]) {
+    let song = load_track(bytes);
+    let (written, _warnings) = omatrack::track::save_song(&song).expect("write");
+    let again = load_track(&written);
+    assert_songs_equal(&song, &again);
+}
+
+fn assert_songs_equal(left: &omatrack::Song, right: &omatrack::Song) {
+    assert_eq!(left.title, right.title, "title");
+    assert_eq!(left.tracker, right.tracker, "tracker");
+    assert_eq!(left.format, right.format, "format");
+    assert_eq!(left.channels, right.channels, "channels");
+    assert_eq!(left.orders, right.orders, "orders");
+    assert_eq!(left.restart, right.restart, "restart");
+    assert_eq!(left.linear, right.linear, "linear");
+    assert_eq!(left.initial_speed, right.initial_speed, "speed");
+    assert_eq!(left.initial_tempo, right.initial_tempo, "tempo");
+    assert_eq!(
+        left.initial_global_volume, right.initial_global_volume,
+        "gvol"
+    );
+    assert_eq!(left.global_volume_max, right.global_volume_max, "gvol max");
+    assert_eq!(left.initial_pan, right.initial_pan, "pan");
+    assert_eq!(
+        left.initial_channel_volume, right.initial_channel_volume,
+        "cvol"
+    );
+    assert_eq!(left.initial_mute, right.initial_mute, "mute");
+    assert_eq!(left.instrument_mode, right.instrument_mode, "ins mode");
+    assert_eq!(left.old_effects, right.old_effects, "old fx");
+    assert_eq!(left.compatible_gxx, right.compatible_gxx, "gxx");
+    assert_eq!(left.compat, right.compat, "compat");
+    assert_eq!(left.patterns.len(), right.patterns.len(), "patterns");
+    for (index, (a, b)) in left.patterns.iter().zip(right.patterns.iter()).enumerate() {
+        assert_eq!(a.rows.len(), b.rows.len(), "pattern {index} rows");
+        for (row_index, (ar, br)) in a.rows.iter().zip(b.rows.iter()).enumerate() {
+            assert_eq!(
+                ar.len(),
+                br.len(),
+                "pattern {index} row {row_index} channels"
+            );
+            for (channel, (ac, bc)) in ar.iter().zip(br.iter()).enumerate() {
+                assert_eq!(ac, bc, "pattern {index} row {row_index} ch {channel}");
+            }
+        }
+    }
+    assert_eq!(
+        left.instruments.len(),
+        right.instruments.len(),
+        "instruments"
+    );
+    for (index, (a, b)) in left.instruments.iter().zip(&right.instruments).enumerate() {
+        assert_eq!(a.name, b.name, "instrument {index} name");
+        assert_eq!(a.keys, b.keys, "instrument {index} keys");
+        assert_eq!(a.volume_env, b.volume_env, "instrument {index} vol env");
+        assert_eq!(a.pan_env, b.pan_env, "instrument {index} pan env");
+        assert_eq!(a.pitch_env, b.pitch_env, "instrument {index} pitch env");
+        assert_eq!(a.fadeout, b.fadeout, "instrument {index} fade");
+        assert_eq!(a.vibrato, b.vibrato, "instrument {index} vib");
+        assert_eq!(a.nna, b.nna, "instrument {index} nna");
+        assert_eq!(a.dct, b.dct, "instrument {index} dct");
+        assert_eq!(a.dca, b.dca, "instrument {index} dca");
+        assert_eq!(a.global_volume, b.global_volume, "instrument {index} gvol");
+        assert_eq!(a.pan, b.pan, "instrument {index} pan");
+        assert_eq!(a.owned_samples, b.owned_samples, "instrument {index} owned");
+    }
+    assert_eq!(left.samples.len(), right.samples.len(), "samples");
+    for (index, (a, b)) in left.samples.iter().zip(&right.samples).enumerate() {
+        assert_eq!(a.name, b.name, "sample {index} name");
+        assert_eq!(a.bits, b.bits, "sample {index} bits");
+        assert_eq!(a.volume, b.volume, "sample {index} volume");
+        assert_eq!(a.global_volume, b.global_volume, "sample {index} gvol");
+        assert_eq!(a.pan, b.pan, "sample {index} pan");
+        assert_eq!(a.finetune, b.finetune, "sample {index} fine");
+        assert_eq!(a.relative_note, b.relative_note, "sample {index} rel");
+        assert_eq!(a.c5_speed, b.c5_speed, "sample {index} c5");
+        assert_eq!(a.loop_start, b.loop_start, "sample {index} loop start");
+        assert_eq!(a.loop_end, b.loop_end, "sample {index} loop end");
+        assert_eq!(a.loop_kind, b.loop_kind, "sample {index} loop");
+        assert_eq!(a.sustain_start, b.sustain_start, "sample {index} sus start");
+        assert_eq!(a.sustain_end, b.sustain_end, "sample {index} sus end");
+        assert_eq!(a.sustain_kind, b.sustain_kind, "sample {index} sus");
+        assert_eq!(a.vibrato, b.vibrato, "sample {index} vib");
+        assert_eq!(a.pcm.len(), b.pcm.len(), "sample {index} pcm len");
+        if let Some(at) = a.pcm.iter().zip(&b.pcm).position(|(l, r)| l != r) {
+            panic!(
+                "sample {index} pcm differs at {at}: {} vs {}",
+                a.pcm[at], b.pcm[at]
+            );
+        }
+    }
+}
+
+#[test]
 fn cc0_fixtures_load_and_make_sound() {
     let cases = [
         (

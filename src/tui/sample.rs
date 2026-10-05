@@ -16,39 +16,6 @@ use crate::SAMPLE_COUNT;
 
 use super::app::{App, Command, Outcome};
 
-fn tracked_edit(command: Command) -> bool {
-    matches!(
-        command,
-        Command::BeginImport
-            | Command::BeginExportSample
-            | Command::BeginVolume
-            | Command::BeginFinetune
-            | Command::BeginLoop
-            | Command::BeginTrim
-            | Command::BeginCopySample
-            | Command::ToggleSampleLoop
-            | Command::NormalizeSample
-            | Command::ReverseSample
-            | Command::FadeIn
-            | Command::FadeOut
-            | Command::ClearSampleData
-            | Command::AuditionSample
-            | Command::PreviewNote(_)
-            | Command::FieldPush(_)
-            | Command::FieldBackspace
-            | Command::FieldClear
-            | Command::FieldConfirm
-            | Command::ImportNudgeNote(_)
-            | Command::ImportNudgeFine(_)
-            | Command::ImportToggleNormalize
-            | Command::ImportToggleDither
-            | Command::ImportRateArm
-            | Command::ImportRateDigit(_)
-            | Command::ImportRateBackspace
-            | Command::ImportConfirm
-    )
-}
-
 /// Choosing a WAV to read, or a path to write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PathPrompt {
@@ -122,6 +89,8 @@ pub(crate) struct FieldPrompt {
     pub buffer: String,
     /// Why the last Enter was rejected.
     pub error: Option<String>,
+    /// Replaces the default hint when the open song is XM or IT.
+    pub hint: Option<String>,
 }
 
 /// The sample field a [`FieldPrompt`] edits.
@@ -192,11 +161,10 @@ pub(crate) fn field_command(key: super::app::Key) -> Option<Command> {
 impl App {
     /// Apply a sample-pane command. [`Err`] is a command this pane does not own.
     pub(crate) fn apply_sample(&mut self, command: Command) -> Result<Outcome, Command> {
-        if self.is_readonly() && tracked_edit(command) {
-            self.set_error(
-                "XM and IT songs are read-only. Sample editing is not supported yet. Ctrl-G still renders a WAV.",
-            );
-            return Ok(Outcome::None);
+        if self.track.is_some() {
+            if let Some(outcome) = self.apply_track_sample(command) {
+                return Ok(outcome);
+            }
         }
         match command {
             Command::BeginImport => {
@@ -414,6 +382,362 @@ impl App {
         }
     }
 
+    /// Sample commands for an XM or IT song. `None` means the shared path UI
+    /// should handle the command.
+    fn apply_track_sample(&mut self, command: Command) -> Option<Outcome> {
+        use crate::track::edit;
+        let slot = self.sample;
+        match command {
+            Command::BeginVolume => {
+                self.open_track_field(FieldKind::Volume);
+                Some(Outcome::None)
+            }
+            Command::BeginFinetune => {
+                if self.track.as_ref().map(|song| song.format) == Some(crate::track::Format::It) {
+                    self.set_error(
+                        "IT samples store a C-5 speed, not finetune. The speed is kept on save.",
+                    );
+                    return Some(Outcome::None);
+                }
+                self.open_track_field(FieldKind::Finetune);
+                Some(Outcome::None)
+            }
+            Command::BeginLoop => {
+                self.open_track_field(FieldKind::Loop);
+                Some(Outcome::None)
+            }
+            Command::BeginTrim => {
+                self.open_track_field(FieldKind::Trim);
+                Some(Outcome::None)
+            }
+            Command::BeginCopySample => {
+                self.open_track_field(FieldKind::CopyTo);
+                Some(Outcome::None)
+            }
+            Command::ToggleSampleLoop => {
+                Some(self.edit_track_sample(edit::toggle_loop, "Toggled loop"))
+            }
+            Command::NormalizeSample => Some(self.edit_track_sample(
+                |sample| {
+                    edit::normalize(sample);
+                    Ok(())
+                },
+                "Normalized",
+            )),
+            Command::ReverseSample => Some(self.edit_track_sample(
+                |sample| {
+                    edit::reverse(sample);
+                    Ok(())
+                },
+                "Reversed",
+            )),
+            Command::FadeIn => Some(self.edit_track_sample(
+                |sample| {
+                    edit::fade_in(sample);
+                    Ok(())
+                },
+                "Fade in",
+            )),
+            Command::FadeOut => Some(self.edit_track_sample(
+                |sample| {
+                    edit::fade_out(sample);
+                    Ok(())
+                },
+                "Fade out",
+            )),
+            Command::ClearSampleData => Some(self.edit_track_sample(
+                |sample| {
+                    edit::clear_data(sample);
+                    Ok(())
+                },
+                "Cleared sample data",
+            )),
+            Command::AuditionSample => Some(self.audition_track()),
+            Command::FieldConfirm => Some(self.confirm_track_field()),
+            Command::ImportConfirm => {
+                self.confirm_track_import();
+                Some(Outcome::Edited)
+            }
+            _ => {
+                let _ = slot;
+                None
+            }
+        }
+    }
+
+    fn open_track_field(&mut self, kind: FieldKind) {
+        let Some(sample) = self
+            .track
+            .as_ref()
+            .and_then(|song| song.samples.get(self.sample))
+        else {
+            self.set_error("That sample slot does not exist");
+            return;
+        };
+        let (buffer, hint) = match kind {
+            FieldKind::Volume => (sample.volume.to_string(), "0..=64"),
+            FieldKind::Finetune => (sample.finetune.to_string(), "-128..=127"),
+            FieldKind::Loop => {
+                let length = sample.loop_end.saturating_sub(sample.loop_start);
+                (
+                    format!("{} {length}", sample.loop_start),
+                    "start length, in frames; length 0 turns it off",
+                )
+            }
+            FieldKind::Trim => (
+                format!("0 {}", sample.pcm.len()),
+                "start end, end exclusive, in frames",
+            ),
+            FieldKind::CopyTo => (String::new(), "destination slot, counting from 1"),
+        };
+        self.overlay = super::app::Overlay::Field(FieldPrompt {
+            kind,
+            buffer,
+            error: None,
+            hint: Some(hint.to_string()),
+        });
+    }
+
+    fn edit_track_sample(
+        &mut self,
+        edit_sample: impl FnOnce(&mut crate::track::Sample) -> Result<(), String>,
+        label: &str,
+    ) -> Outcome {
+        let slot = self.sample;
+        let mut error = None;
+        let changed = self.edit_track(|song| {
+            let Some(sample) = song.samples.get_mut(slot) else {
+                error = Some("That sample slot does not exist".to_string());
+                return;
+            };
+            if let Err(err) = edit_sample(sample) {
+                error = Some(err);
+            }
+        });
+        if let Some(err) = error {
+            self.message = Some(err);
+            return Outcome::None;
+        }
+        if changed {
+            self.notice = None;
+            self.message = Some(label.to_string());
+            Outcome::Edited
+        } else {
+            self.message = Some(format!("{label} (no change)"));
+            Outcome::None
+        }
+    }
+
+    fn confirm_track_field(&mut self) -> Outcome {
+        let (kind, buffer) = match &self.overlay {
+            super::app::Overlay::Field(prompt) => (prompt.kind, prompt.buffer.clone()),
+            _ => return Outcome::None,
+        };
+        let slots = self
+            .track
+            .as_ref()
+            .map(|song| song.samples.len())
+            .unwrap_or(0);
+        let applied = match kind {
+            FieldKind::Volume => parse_u8_range(&buffer, 0, 64, "volume").map(|volume| {
+                self.edit_track_sample(
+                    move |sample| crate::track::edit::set_volume(sample, volume),
+                    &format!("Volume {volume}"),
+                )
+            }),
+            FieldKind::Finetune => parse_i8_range(&buffer, -128, 127, "finetune").map(|finetune| {
+                self.edit_track_sample(
+                    move |sample| crate::track::edit::set_finetune(sample, finetune),
+                    &format!("Finetune {finetune:+}"),
+                )
+            }),
+            FieldKind::Loop => {
+                parse_pair(&buffer, "loop start and length").map(|(start, length)| {
+                    let end = start.saturating_add(length);
+                    self.edit_track_sample(
+                        move |sample| {
+                            crate::track::edit::set_loop(sample, start as u32, end as u32)
+                        },
+                        &if length == 0 {
+                            "Loop off".to_string()
+                        } else {
+                            format!("Loop {start}+{length}")
+                        },
+                    )
+                })
+            }
+            FieldKind::Trim => parse_pair(&buffer, "trim start and end").map(|(start, end)| {
+                self.edit_track_sample(
+                    move |sample| crate::track::edit::trim(sample, start, end),
+                    &format!("Trimmed to {start}..{end}"),
+                )
+            }),
+            FieldKind::CopyTo => {
+                let max = u8::try_from(slots).unwrap_or(255).max(1);
+                parse_u8_range(&buffer, 1, max, "slot").map(|dest| {
+                    let dest_index = usize::from(dest) - 1;
+                    if dest_index == self.sample {
+                        self.message = Some("Choose a different slot to copy into".to_string());
+                        return Outcome::None;
+                    }
+                    let source = self.sample;
+                    let changed = self.edit_track(|song| {
+                        if let Some(sample) = song.samples.get(source).cloned() {
+                            if dest_index < song.samples.len() {
+                                song.samples[dest_index] = sample;
+                            } else {
+                                song.samples
+                                    .resize_with(dest_index + 1, crate::track::Sample::default);
+                                song.samples[dest_index] = song.samples[source].clone();
+                            }
+                        }
+                    });
+                    if changed {
+                        self.sample = dest_index;
+                        self.message =
+                            Some(format!("Copied sample {:02} to {dest:02}", source + 1));
+                        Outcome::Edited
+                    } else {
+                        Outcome::None
+                    }
+                })
+            }
+        };
+        match applied {
+            Ok(outcome) => {
+                if !matches!(outcome, Outcome::None) || self.message.is_some() {
+                    self.overlay = super::app::Overlay::None;
+                }
+                outcome
+            }
+            Err(err) => {
+                if let super::app::Overlay::Field(prompt) = &mut self.overlay {
+                    prompt.error = Some(err.to_string());
+                }
+                Outcome::None
+            }
+        }
+    }
+
+    fn confirm_track_import(&mut self) {
+        let super::app::Overlay::Import(prompt) = &self.overlay else {
+            return;
+        };
+        let path = prompt.path.clone();
+        let finetune = prompt.finetune;
+        let normalize = prompt.normalize;
+        let dither = prompt.dither;
+        let typed = prompt.rate_text.clone();
+        let note = prompt.note;
+        let rate = if let Some(text) = typed {
+            match text.parse::<u32>() {
+                Ok(rate) if rate > 0 => rate,
+                _ => {
+                    if let super::app::Overlay::Import(prompt) = &mut self.overlay {
+                        prompt.error = Some("Rate must be a number above 0".to_string());
+                    }
+                    return;
+                }
+            }
+        } else {
+            rate_for_note(note, finetune_nibble(finetune))
+        };
+        let options = crate::ImportOptions {
+            target_rate: rate,
+            normalize,
+            dither,
+            dither_seed: crate::convert::DEFAULT_DITHER_SEED,
+        };
+        let imported = match std::fs::read(&path) {
+            Err(err) => {
+                self.overlay = super::app::Overlay::None;
+                self.message = Some(format!("Failed to read {}: {err}", path.display()));
+                return;
+            }
+            Ok(bytes) => match decode_wav(&bytes).and_then(|wav| crate::import_pcm(&wav, &options))
+            {
+                Ok(imported) => imported,
+                Err(err) => {
+                    self.overlay = super::app::Overlay::None;
+                    self.message = Some(err.to_string());
+                    return;
+                }
+            },
+        };
+        let warning = imported.warning.clone();
+        let pcm: Vec<i16> = imported
+            .data
+            .iter()
+            .map(|byte| i16::from(*byte as i8) << 8)
+            .collect();
+        let bytes = pcm.len();
+        let slot = self.sample;
+        let stem = stem_name(&path);
+        let fine = finetune.saturating_mul(16);
+        let changed = self.edit_track(move |song| {
+            if slot >= song.samples.len() {
+                song.samples
+                    .resize_with(slot + 1, crate::track::Sample::default);
+            }
+            let sample = &mut song.samples[slot];
+            sample.pcm = pcm;
+            sample.bits = 8;
+            sample.loop_kind = crate::track::LoopKind::None;
+            sample.loop_start = 0;
+            sample.loop_end = 0;
+            sample.finetune = fine;
+            if sample.volume == 0 {
+                sample.volume = 64;
+            }
+            if sample.name.is_empty() {
+                if let Some(name) = stem {
+                    sample.name = name;
+                }
+            }
+        });
+        self.overlay = super::app::Overlay::None;
+        let mut text = format!(
+            "Imported {} into sample {:02}, {bytes} frames at {rate} Hz",
+            path.display(),
+            slot + 1
+        );
+        if let Some(warning) = warning {
+            text.push_str(". ");
+            text.push_str(&warning);
+            self.notice = Some(warning);
+        }
+        if !changed {
+            text.push_str(" (no change)");
+        }
+        self.message = Some(text);
+    }
+
+    fn audition_track(&mut self) -> Outcome {
+        let Some(sample) = self
+            .track
+            .as_ref()
+            .and_then(|song| song.samples.get(self.sample))
+        else {
+            self.message = Some("Sample is empty".to_string());
+            return Outcome::None;
+        };
+        if sample.pcm.is_empty() {
+            self.message = Some("Sample is empty".to_string());
+            return Outcome::None;
+        }
+        if self.playing {
+            self.message = Some("Stop the song to preview the sample".to_string());
+            return Outcome::None;
+        }
+        let period = notes::period_at(self.preview_note);
+        self.message = Some(format!(
+            "Preview {} (high byte, through the module mixer)",
+            format_period(period)
+        ));
+        self.audition_scratch = Some(track_preview_module(sample));
+        Outcome::Audition { slot: 0, period }
+    }
+
     fn audition(&mut self) -> Outcome {
         let sample = &self.module.samples[self.sample];
         if sample.data.is_empty() {
@@ -464,7 +788,15 @@ impl App {
                 let mut path = self.start_dir();
                 path.push(format!("sample-{:02}.wav", self.sample + 1));
                 prompt.buffer = path.to_string_lossy().into_owned();
-                prompt.rate = c2_rate(self.module.samples[self.sample].finetune_raw).to_string();
+                prompt.rate = if let Some(song) = &self.track {
+                    song.samples
+                        .get(self.sample)
+                        .map(|sample| sample.c5_speed.max(1))
+                        .unwrap_or(8363)
+                        .to_string()
+                } else {
+                    c2_rate(self.module.samples[self.sample].finetune_raw).to_string()
+                };
             }
             PathKind::ExportSong => {
                 let mut path = self.start_dir();
@@ -598,6 +930,38 @@ impl App {
     fn write_path(&mut self, kind: PathKind, path: PathBuf, rate_text: &str) -> Outcome {
         match kind {
             PathKind::ExportSample => {
+                if let Some(song) = &self.track {
+                    let Some(sample) = song.samples.get(self.sample) else {
+                        self.overlay = super::app::Overlay::None;
+                        self.set_error("That sample slot does not exist");
+                        return Outcome::None;
+                    };
+                    let rate = sample.c5_speed.max(1);
+                    let data: Vec<u8> =
+                        sample.pcm.iter().map(|frame| (*frame >> 8) as u8).collect();
+                    let bits16 = sample.bits == 16;
+                    self.overlay = super::app::Overlay::None;
+                    return match write_mono8_wav(&path, rate, &data) {
+                        Ok(()) => {
+                            let extra = if bits16 {
+                                " The file is the high byte of the 16-bit sample."
+                            } else {
+                                ""
+                            };
+                            self.message = Some(format!(
+                                "Wrote {} ({} Hz, {} bytes).{extra}",
+                                path.display(),
+                                rate,
+                                data.len()
+                            ));
+                            Outcome::None
+                        }
+                        Err(err) => {
+                            self.set_error(err.to_string());
+                            Outcome::None
+                        }
+                    };
+                }
                 let finetune = self.module.samples[self.sample].finetune_raw;
                 let rate = match parse_export_rate(rate_text, finetune) {
                     Ok(rate) => rate,
@@ -647,25 +1011,10 @@ impl App {
                 }
                 Outcome::None
             }
-            PathKind::SaveModule if self.is_readonly() => {
-                if let super::app::Overlay::Path(prompt) = &mut self.overlay {
-                    prompt.error = Some(crate::track::SAVE_UNSUPPORTED.to_string());
-                }
-                Outcome::None
-            }
-            PathKind::SaveModule => match self.module.save_stored(&path) {
-                Ok(omitted) => {
-                    let name = path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("module")
-                        .to_string();
-                    self.path = path;
-                    self.editor.mark_saved();
+            PathKind::SaveModule => match self.save_as(path) {
+                Ok(message) => {
                     self.overlay = super::app::Overlay::None;
-                    let patterns = self.module.patterns.len();
-                    self.note_unstored_patterns(omitted);
-                    self.set_message(super::app::save_status(&name, omitted, patterns));
+                    self.set_message(message);
                     Outcome::Saved
                 }
                 Err(err) => {
@@ -785,6 +1134,7 @@ impl App {
             kind,
             buffer,
             error: None,
+            hint: None,
         });
     }
 
@@ -1081,6 +1431,40 @@ fn parse_export_rate(text: &str, finetune_raw: u8) -> Result<u32, String> {
         .ok()
         .filter(|rate| *rate > 0)
         .ok_or_else(|| format!("Rate must be above 0, or blank for C-2, got {text}"))
+}
+
+fn track_preview_module(sample: &crate::track::Sample) -> crate::Module {
+    let mut module = crate::Module::new(crate::module::Tag::Mk);
+    let mut data: Vec<u8> = sample.pcm.iter().map(|frame| (*frame >> 8) as u8).collect();
+    if data.len() % 2 == 1 {
+        data.push(0);
+    }
+    if data.len() > crate::module::MAX_SAMPLE_BYTES {
+        data.truncate(crate::module::MAX_SAMPLE_BYTES & !1);
+    }
+    if let Err(err) = module.samples[0].set_data(data) {
+        let _ = err;
+    }
+    module.samples[0].volume = if sample.volume == 0 {
+        64
+    } else {
+        sample.volume.min(64)
+    };
+    if sample.loops() {
+        let start = (sample.loop_start as usize) & !1;
+        let end = (sample.loop_end as usize).min(module.samples[0].data.len()) & !1;
+        if end.saturating_sub(start) >= 4 {
+            module.samples[0].loop_start = u16::try_from(start / 2).unwrap_or(0);
+            module.samples[0].loop_length = u16::try_from((end - start) / 2).unwrap_or(1);
+        }
+    }
+    module.patterns[0].rows[0][0] = crate::Cell {
+        sample: 1,
+        period: 428,
+        effect: 0,
+        param: 0,
+    };
+    module
 }
 
 fn finetune_nibble(finetune: i8) -> u8 {

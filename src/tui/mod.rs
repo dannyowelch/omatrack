@@ -284,7 +284,11 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
         }
         Outcome::Edited => {
             if app.playing {
-                audio.replace_module(&app.module);
+                if let Some(song) = &app.track {
+                    audio.replace_track(song);
+                } else {
+                    audio.replace_module(&app.module);
+                }
             }
         }
         Outcome::Save | Outcome::SaveAndQuit => {
@@ -303,7 +307,12 @@ fn handle_command(app: &mut App, audio: &mut AudioOutput, command: Command, stat
             remember_document(app, state_path);
         }
         Outcome::Audition { slot, period } => {
-            if let Err(err) = audio.audition(&app.module, slot, period) {
+            let result = if let Some(module) = app.audition_scratch.take() {
+                audio.audition(&module, slot, period)
+            } else {
+                audio.audition(&app.module, slot, period)
+            };
+            if let Err(err) = result {
                 app.fail_audio(err.to_string());
             }
         }
