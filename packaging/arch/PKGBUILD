@@ -1,9 +1,7 @@
 # Maintainer: Omatrack contributors <https://github.com/dannyowelch/omatrack>
 #
-# Builds from the tagged GitHub release tarball.
+# Builds from the tagged GitHub release tarball. sha256sums is the checksum of
 # https://github.com/dannyowelch/omatrack/archive/refs/tags/v0.4.1.tar.gz
-# sha256sums is SKIP until that tag exists. After tagging, replace SKIP with
-# the checksum of the release tarball (`sha256sum` of the downloaded archive).
 
 pkgname=omatrack
 pkgver=0.4.1
@@ -18,7 +16,7 @@ optdepends=('ghostty: terminal for the desktop entry'
             'alacritty: terminal for the desktop entry'
             'kitty: terminal for the desktop entry')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
-sha256sums=('SKIP')
+sha256sums=('fd677c52048486bde16e2a3de849e28d9f5d10682da077d09511203ac14c3d8b')
 
 prepare() {
   cd "$pkgname-$pkgver"
