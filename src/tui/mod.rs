@@ -159,13 +159,12 @@ pub fn run(session: Session) -> Result<(), Error> {
         last_draw = now;
         // Software playback publishes the mix before the analyzer reads it.
         // A real device is already publishing from its own callback.
+        // Meters under the pattern read this even when the spectrum is hidden.
         audio.pump_software();
-        if app.viz_mode != VizMode::Off {
-            let snapshot = audio.visualization();
-            app.tick_viz(snapshot.as_ref(), dt);
-            if let Some(peaks) = audio.track_peaks() {
-                app.viz.push_extra_peaks(&peaks, dt);
-            }
+        let snapshot = audio.visualization();
+        app.tick_viz(snapshot.as_ref(), dt);
+        if let Some(peaks) = audio.track_peaks() {
+            app.viz.push_extra_peaks(&peaks, dt);
         }
         if reload.swap(false, Ordering::Relaxed) || watch.changed() {
             let loaded = theme::resolve(theme_request, color_depth, &home, state.as_deref());

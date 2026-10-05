@@ -608,16 +608,18 @@ fn truncated(context: &'static str, expected: usize, actual: usize) -> Error {
 }
 
 fn latin1(bytes: &[u8]) -> String {
+    // Drop C0 controls and DEL. An interior NUL is not a column, so drawing
+    // it would slide the rest of the row over the pane border.
     let end = bytes
         .iter()
-        .rposition(|b| *b != 0 && *b != b' ')
-        .map(|i| i + 1)
+        .rposition(|byte| *byte > b' ' && *byte != 0x7F)
+        .map(|index| index + 1)
         .unwrap_or(0);
     bytes[..end]
         .iter()
-        .map(|b| char::from(*b).to_string())
+        .filter(|byte| **byte >= 0x20 && **byte != 0x7F)
+        .map(|byte| char::from(*byte))
         .collect::<String>()
-        .trim_matches('\0')
         .trim()
         .to_string()
 }

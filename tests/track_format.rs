@@ -21,6 +21,17 @@ fn cc0_fixtures_load_and_make_sound() {
         let song = load_track(&bytes);
         assert_eq!(song.format, format, "{path}");
         assert_eq!(song.channels, channels, "{path} title {}", song.title);
+        assert!(
+            song.samples
+                .iter()
+                .all(|sample| !sample.name.chars().any(|ch| ch.is_control())),
+            "{path} sample names contain controls: {:?}",
+            song.samples
+                .iter()
+                .map(|sample| &sample.name)
+                .filter(|name| name.chars().any(|ch| ch.is_control()))
+                .collect::<Vec<_>>()
+        );
         let stats = render_stats(&song, 2.0);
         assert!(stats.peak > 1000, "{path} peak {}", stats.peak);
         assert!(stats.frames > 20_000, "{path} frames {}", stats.frames);

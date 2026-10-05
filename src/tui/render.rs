@@ -1,4 +1,5 @@
-//! Classic tracker layout: song header, pattern, sample list.
+//! Tracker layout: song header, pattern with a meter under each column, and a
+//! sample list. The spectrum or the scope shares the sample list's row.
 
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
@@ -31,7 +32,7 @@ const HELP_LINES: &[&str] = &[
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
     "Arrows move. Tab changes pane; in edit, Tab changes channel.",
     "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles spectrum, scope, off",
-    "Startup view is the spectrum. Config default_view is spectrum, scope, or off.",
+    "Column meters scroll with the pattern. default_view is spectrum, scope, or off.",
     "Alt-1..4 mute a channel while editing. 1-4 mute in browse.",
     "",
     "Edit mode. Lower row is the octave, upper row is one octave higher.",
@@ -64,22 +65,22 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         return;
     }
 
+    let inner_h = usize::from(regions.pattern.height.saturating_sub(2));
+    let (row_window, _) = pattern_chrome(inner_h);
+    let wave_lines = if app.focus == Focus::Samples { 2 } else { 0 };
+    let sample_window =
+        usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1 + wave_lines);
+    app.reconcile_scroll(row_window, sample_window);
+
+    draw_song(frame, regions.song, app, theme);
+    draw_pattern(frame, regions.pattern, app, theme);
+    if let Some(panel) = regions.viz {
+        viz::draw_panel(frame, panel, app, theme);
+    }
     if let Some(scope) = regions.scope {
         viz::draw_scope_view(frame, scope, app, theme);
-    } else {
-        let row_window = usize::from(regions.pattern.height.saturating_sub(2)).saturating_sub(2);
-        let wave_lines = if app.focus == Focus::Samples { 2 } else { 0 };
-        let sample_window =
-            usize::from(regions.samples.height.saturating_sub(2)).saturating_sub(1 + wave_lines);
-        app.reconcile_scroll(row_window, sample_window);
-
-        draw_song(frame, regions.song, app, theme);
-        draw_pattern(frame, regions.pattern, app, theme);
-        if let Some(panel) = regions.viz {
-            viz::draw_panel(frame, panel, app, theme);
-        }
-        draw_samples(frame, regions.samples, app, theme);
     }
+    draw_samples(frame, regions.samples, app, theme);
     frame.render_widget(
         Paragraph::new(clip(transport_text(app), regions.transport.width)).style(
             if app.audio_error.is_some() {
@@ -224,59 +225,55 @@ fn layout(area: Rect, app: &App) -> Option<Regions> {
     ])
     .areas(area);
 
-    if app.viz_mode == VizMode::Scope {
-        return Some(Regions {
-            song: Rect::default(),
-            pattern: Rect::default(),
-            samples: Rect::default(),
-            viz: None,
-            scope: Some(body),
-            transport,
-            status,
-            help,
-        });
-    }
-
-    let viz_h = if app.viz_mode == VizMode::Panel {
-        viz::panel_height(area.height)
-    } else {
-        0
-    };
-    let panel = viz_h > 0;
-    let upper = Rect {
-        x: body.x,
-        y: body.y,
-        width: body.width,
-        height: body.height.saturating_sub(viz_h),
-    };
-    let viz = panel.then_some(Rect {
-        x: body.x,
-        y: body.y.saturating_add(upper.height),
-        width: body.width,
-        height: viz_h,
-    });
-
     let inner_w = usize::from(area.width.saturating_sub(2));
     let order_lines = desired_order_lines(app, inner_w);
-    let header_h = header_height(upper.height, order_lines);
-    let sample_h = sample_height(upper.height, header_h);
-    let [song, pattern, samples] = Layout::vertical([
+    let header_h = header_height(body.height, order_lines);
+    let sample_h = sample_height(body.height, header_h);
+    let [song, pattern, band] = Layout::vertical([
         Constraint::Length(header_h),
         Constraint::Fill(1),
         Constraint::Length(sample_h),
     ])
-    .areas(upper);
+    .areas(body);
+    let (samples, viz, scope) = split_band(band, app.viz_mode);
 
     Some(Regions {
         song,
         pattern,
         samples,
         viz,
-        scope: None,
+        scope,
         transport,
         status,
         help,
     })
+}
+
+/// Samples on the left. Spectrum or scope takes the right half of that row.
+///
+/// `off` leaves the sample list the full width.
+fn split_band(band: Rect, mode: VizMode) -> (Rect, Option<Rect>, Option<Rect>) {
+    if mode == VizMode::Off {
+        return (band, None, None);
+    }
+    let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(band);
+    if mode == VizMode::Scope {
+        (left, None, Some(right))
+    } else {
+        (left, Some(right), None)
+    }
+}
+
+/// Note rows that fit in the pattern pane, and whether the meter strip takes a row.
+///
+/// One row is the pattern title, one is the column headers. The meter strip
+/// takes one more when the pane is tall enough, so the notes give up a single row.
+fn pattern_chrome(inner_h: usize) -> (usize, usize) {
+    if inner_h > 2 {
+        (inner_h - 3, 1)
+    } else {
+        (inner_h.saturating_sub(2), 0)
+    }
 }
 
 fn header_height(body_h: u16, order_lines: u16) -> u16 {
@@ -317,11 +314,11 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     let inner_h = usize::from(area.height.saturating_sub(2));
     let mut lines = Vec::new();
     if inner_h > 0 {
-        let title = if let Some(song) = &app.track {
+        let title = plain(&if let Some(song) = &app.track {
             song.title.clone()
         } else {
             app.module.display_title()
-        };
+        });
         let dirty = if app.is_dirty() { " *" } else { "" };
         let (text, style) = if title.is_empty() {
             (format!("(untitled){dirty}"), theme.dim())
@@ -370,7 +367,7 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     let block = pane(title, focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
-    let row_window = inner_h.saturating_sub(2);
+    let (row_window, meter_rows) = pattern_chrome(inner_h);
 
     let mut lines = Vec::new();
     if inner_h > 0 {
@@ -394,6 +391,9 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
             theme.dim(),
         ));
     }
+    if meter_rows == 1 {
+        seal_pattern_lines(&mut lines, inner_h, mod_meter_line(app, theme));
+    }
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
@@ -402,7 +402,7 @@ fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme
     let block = pane("Pattern", focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
-    let row_window = inner_h.saturating_sub(2);
+    let (row_window, meter_rows) = pattern_chrome(inner_h);
     let channels = app.channel_count();
     let visible = inner_w.saturating_sub(3) / TRACK_CELL;
     let visible = visible.max(1).min(channels);
@@ -427,7 +427,67 @@ fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme
             lines.push(track_row(song, row, start_ch, end_ch, app, theme, inner_w));
         }
     }
+    if meter_rows == 1 {
+        seal_pattern_lines(
+            &mut lines,
+            inner_h,
+            track_meter_line(app, theme, start_ch, end_ch),
+        );
+    }
     frame.render_widget(Paragraph::new(lines).block(block), area);
+}
+
+fn seal_pattern_lines(lines: &mut Vec<Line<'static>>, inner_h: usize, meter: Line<'static>) {
+    while lines.len() + 1 < inner_h {
+        lines.push(Line::from(""));
+    }
+    if lines.len() < inner_h {
+        lines.push(meter);
+    }
+}
+
+fn mod_meter_line(app: &App, theme: Theme) -> Line<'static> {
+    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    for channel in 0..CHANNELS {
+        if channel > 0 {
+            spans.push(Span::styled(" | ".to_string(), theme.dim()));
+        }
+        spans.extend(channel_meter_spans(app, channel, 10, theme));
+    }
+    Line::from(spans)
+}
+
+fn track_meter_line(app: &App, theme: Theme, start: usize, end: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    for channel in start..end {
+        if channel > start {
+            spans.push(Span::styled(" ".to_string(), theme.dim()));
+        }
+        spans.extend(channel_meter_spans(app, channel, TRACK_CELL - 1, theme));
+    }
+    Line::from(spans)
+}
+
+fn channel_meter_spans(
+    app: &App,
+    channel: usize,
+    width: usize,
+    theme: Theme,
+) -> Vec<Span<'static>> {
+    let (level, _) = app.viz.meter(channel);
+    let color = theme.channels[channel % theme.channels.len()];
+    let (filled, rest) = viz::meter_bar(level, width);
+    let mut spans = Vec::new();
+    if !filled.is_empty() {
+        spans.push(Span::styled(filled, paint(color, theme.background, false)));
+    }
+    if !rest.is_empty() {
+        spans.push(Span::styled(rest, theme.dim()));
+    }
+    if spans.is_empty() {
+        spans.push(Span::styled(String::new(), theme.fill()));
+    }
+    spans
 }
 
 const TRACK_CELL: usize = 11;
@@ -558,8 +618,9 @@ fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     }
     let sample_window = inner_h.saturating_sub(lines.len() + 1);
 
+    let name_cols = mod_name_cols(inner_w);
     if inner_h > lines.len() {
-        lines.push(styled(sample_header(), theme.dim()));
+        lines.push(styled(sample_header(name_cols), theme.dim()));
     }
     let start = app.sample_offset;
     let end = (start + sample_window).min(crate::module::SAMPLE_COUNT);
@@ -572,7 +633,7 @@ fn draw_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         } else {
             theme.text()
         };
-        let mut text = sample_row(&app.module.samples[index], index + 1);
+        let mut text = sample_row(&app.module.samples[index], index + 1, name_cols);
         let pad = inner_w.saturating_sub(text.chars().count());
         if selected && pad > 0 {
             text.push_str(&" ".repeat(pad));
@@ -591,11 +652,17 @@ fn draw_track_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
         return;
     };
     let mut lines = Vec::new();
+    let name_cols = track_name_cols(inner_w);
     if inner_h > 0 {
         lines.push(styled(
             format!(
-                "{:>3} {:<22} {:>7} {:>3} {}",
-                "#", "Name", "Frames", "Vol", "Loop"
+                "{:>3} {:<name_cols$} {:>7} {:>3} {}",
+                "#",
+                "Name",
+                "Frames",
+                "Vol",
+                "Loop",
+                name_cols = name_cols,
             ),
             theme.dim(),
         ));
@@ -620,11 +687,12 @@ fn draw_track_samples(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
             crate::track::LoopKind::None => "-",
         };
         let mut text = format!(
-            "{:03} {:<22} {:7} {:3} {looped}",
+            "{:03} {:<name_cols$} {:7} {:3} {looped}",
             index + 1,
-            fit_chars(&sample.name, 22),
+            fit_chars(&sample.name, name_cols),
             sample.pcm.len(),
             sample.volume,
+            name_cols = name_cols,
         );
         let pad = inner_w.saturating_sub(text.chars().count());
         if selected && pad > 0 {
@@ -828,21 +896,42 @@ fn effect_field(effect: u8, param: u8) -> String {
     }
 }
 
-fn sample_header() -> String {
+/// Name column that still leaves room for bytes, volume, finetune, and a loop.
+fn mod_name_cols(inner_w: usize) -> usize {
+    // "NN " + name + " " + bytes(6) + " " + vol(3) + " " + fn(2) + " " + loop(8)
+    let fixed = 2 + 1 + 1 + 6 + 1 + 3 + 1 + 2 + 1 + 8;
+    inner_w.saturating_sub(fixed).clamp(4, 22)
+}
+
+/// Name column that still leaves room for frames, volume, and "Loop".
+fn track_name_cols(inner_w: usize) -> usize {
+    // "NNN " + name + " " + frames(7) + " " + vol(3) + " " + loop(4)
+    let fixed = 3 + 1 + 1 + 7 + 1 + 3 + 1 + 4;
+    inner_w.saturating_sub(fixed).clamp(4, 22)
+}
+
+fn sample_header(name_cols: usize) -> String {
     format!(
-        "{:>2} {:<22} {:>6} {:>3} {:>2} {}",
-        "#", "Name", "Bytes", "Vol", "Fn", "Loop"
+        "{:>2} {:<name_cols$} {:>6} {:>3} {:>2} {}",
+        "#",
+        "Name",
+        "Bytes",
+        "Vol",
+        "Fn",
+        "Loop",
+        name_cols = name_cols,
     )
 }
 
-fn sample_row(sample: &Sample, number: usize) -> String {
+fn sample_row(sample: &Sample, number: usize, name_cols: usize) -> String {
     format!(
-        "{number:02} {:<22} {:6} {:3} {:>2} {}",
-        fit_chars(&sample.display_name(), 22),
+        "{number:02} {:<name_cols$} {:6} {:3} {:>2} {}",
+        fit_chars(&sample.display_name(), name_cols),
         sample.byte_length(),
         sample.volume,
         format_finetune(sample.finetune_raw),
         format_loop(sample),
+        name_cols = name_cols,
     )
 }
 
@@ -856,8 +945,12 @@ fn format_loop(sample: &Sample) -> String {
     }
 }
 
+fn plain(text: &str) -> String {
+    text.chars().filter(|ch| !ch.is_control()).collect()
+}
+
 fn fit_chars(text: &str, width: usize) -> String {
-    let mut out: String = text.chars().take(width).collect();
+    let mut out: String = plain(text).chars().take(width).collect();
     let count = out.chars().count();
     if count < width {
         out.push_str(&" ".repeat(width - count));
@@ -1383,8 +1476,8 @@ mod tests {
             loop_length: 1,
             data: vec![0, 1],
         };
-        let header = sample_header();
-        let row = sample_row(&sample, 1);
+        let header = sample_header(22);
+        let row = sample_row(&sample, 1, 22);
         assert_eq!(header.find("Name"), row.find("kick"));
         assert!(row.contains("-8"), "{row}");
         assert!(row.contains("    2"), "{row}");
@@ -1430,6 +1523,7 @@ mod tests {
         assert_has(&screen, "import WAV");
         assert_has(&screen, "R still renames");
         assert_has(&screen, "F5 cycles spectrum, scope, off");
+        assert_has(&screen, "Column meters scroll with the pattern");
         assert_has(&screen, "default_view");
 
         let mut app = demo();
@@ -1441,55 +1535,390 @@ mod tests {
     }
 
     #[test]
-    fn the_spectrum_fits_a_tall_terminal_and_stays_hidden_on_a_short_one() {
+    fn the_spectrum_shares_the_sample_row_and_the_scope_stays_beside_it() {
         let mut app = demo();
         assert_eq!(app.viz_mode(), VizMode::Panel);
         app.message = None;
-        let short = text_of(&render(&mut app, 80, 24));
-        assert_has(&short, "Demo Tune");
-        assert_has(&short, "C-1");
-        assert!(!short.contains("Spectrum"), "{short}");
-        assert!(!short.contains("too small"), "{short}");
-        assert_has(&short, "Viz");
+        peg_channels(&mut app, &[8_192, 0, 2_000, 0]);
+        for &(width, height) in &[(80u16, 24u16), (80, 30), (100, 40), (160, 50)] {
+            let buf = render(&mut app, width, height);
+            let screen = text_of(&buf);
+            assert_has(&screen, "Demo Tune");
+            assert_has(&screen, "C-1");
+            assert!(!screen.contains("too small"), "{width}x{height}\n{screen}");
+            assert_has(&screen, "Viz");
+            assert_side_by_side(&buf, "Samples", "Spectrum");
+            assert_closed_boxes(&buf);
+            assert_meter_under_channel(&buf, "Ch 1", '█', Color::Rgb(255, 214, 102));
+            assert_meter_under_channel(&buf, "Ch 2", '▁', Color::Rgb(140, 150, 180));
+            assert_spectrum_is_bars_only(&buf);
+            assert_eq!(
+                meter_rows_above_border(&buf),
+                1,
+                "{width}x{height}\n{screen}"
+            );
+        }
 
-        let mut snap = quiet_tone();
-        app.tick_viz(Some(&snap), 0.08);
-        snap.gen = 2;
-        app.tick_viz(Some(&snap), 0.08);
-        let tall = text_of(&render(&mut app, 100, 40));
-        assert_has(&tall, "Spectrum");
-        assert_has(&tall, "Demo Tune");
-        assert_has(&tall, "C-1");
-        assert!(
-            tall.contains('▅') || tall.contains('█') || tall.contains('▇') || tall.contains('▄'),
-            "expected spectrum blocks in:\n{tall}"
-        );
+        app.viz_mode = VizMode::Off;
+        let off = render(&mut app, 100, 40);
+        let off_text = text_of(&off);
+        assert!(!off_text.contains("Spectrum"), "{off_text}");
+        assert!(!off_text.contains("Scope"), "{off_text}");
+        assert_has(&off_text, "kickdrum");
+        assert_full_width_samples(&off);
+        assert_meter_under_channel(&off, "Ch 1", '█', Color::Rgb(255, 214, 102));
 
-        app.apply(Command::CycleViz);
-        let scope = text_of(&render(&mut app, 100, 36));
-        assert_has(&scope, "Scope");
-        assert!(!scope.contains("kickdrum"), "{scope}");
+        app.viz_mode = VizMode::Scope;
+        let scope = render(&mut app, 100, 40);
+        let scope_text = text_of(&scope);
+        assert_side_by_side(&scope, "Samples", "Scope");
+        assert_has(&scope_text, "Pat 00");
+        assert_has(&scope_text, "kickdrum");
         assert!(
-            scope
+            scope_text
                 .chars()
                 .any(|ch| ('\u{2800}'..='\u{28FF}').contains(&ch)),
-            "expected braille in:\n{scope}"
+            "expected braille in:\n{scope_text}"
         );
-        assert_has(&scope, "Stop");
+        assert_has(&scope_text, "Stop");
+        assert_meter_under_channel(&scope, "Ch 1", '█', Color::Rgb(255, 214, 102));
     }
 
-    fn quiet_tone() -> crate::viz::VizSnapshot {
+    #[test]
+    fn meters_follow_scrolled_columns_and_fall_when_the_channel_does() {
+        let mut app = demo();
+        app.install_track(wide_song(12), std::path::PathBuf::from("wide.xm"));
+        let mut hot = vec![0u16; 12];
+        hot[0] = 8_192;
+        hot[11] = 8_192;
+        peg_channels(&mut app, &hot);
+
+        let narrow = render(&mut app, 80, 30);
+        let narrow_text = text_of(&narrow);
+        assert_has(&narrow_text, "XM 12ch");
+        assert!(header_row(&narrow).contains("Ch1 "), "{narrow_text}");
+        assert!(!header_row(&narrow).contains("Ch12"), "{narrow_text}");
+        assert_meter_under_channel(&narrow, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+        assert_meter_under_channel(&narrow, "Ch2 ", '▁', Color::Rgb(140, 150, 180));
+
+        app.channel = 11;
+        let scrolled = render(&mut app, 80, 30);
+        let scrolled_text = text_of(&scrolled);
+        assert!(header_row(&scrolled).contains("Ch12"), "{scrolled_text}");
+        assert!(!header_row(&scrolled).contains("Ch1 "), "{scrolled_text}");
+        assert_meter_under_channel(&scrolled, "Ch12", '█', Color::Rgb(255, 160, 196));
+        assert_meter_under_channel(&scrolled, "Ch7 ", '▁', Color::Rgb(140, 150, 180));
+
+        let before = meter_eighths(&scrolled, "Ch12");
+        peg_channels(&mut app, &[0; 12]);
+        let fallen = render(&mut app, 80, 30);
+        let after = meter_eighths(&fallen, "Ch12");
+        assert!(
+            after < before,
+            "meter did not fall: {before} -> {after}\n{}",
+            text_of(&fallen)
+        );
+    }
+
+    #[test]
+    fn real_modules_keep_meters_with_the_visible_columns() {
+        let xm = load_track("tests/data/blue_intermission_congusbongus_CC0.xm");
+        let mut app = demo();
+        app.install_track(xm, std::path::PathBuf::from("blue.xm"));
+        peg_channels(&mut app, &[8_192, 0, 0, 0, 0, 8_192]);
+        let buf = render(&mut app, 100, 40);
+        let screen = text_of(&buf);
+        assert_has(&screen, "XM 6ch");
+        assert_side_by_side(&buf, "Samples", "Spectrum");
+        assert_meter_under_channel(&buf, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+        assert_meter_under_channel(&buf, "Ch6 ", '█', Color::Rgb(170, 255, 170));
+        assert!(header_row(&buf).contains("Ch6 "), "{screen}");
+        assert!(!header_row(&buf).contains("Ch7"), "{screen}");
+
+        let it = load_track("tests/data/jingle_bells_drmccoy_CC0.it");
+        app.install_track(it, std::path::PathBuf::from("bells.it"));
+        peg_channels(&mut app, &[8_192, 0, 0, 0, 0, 0, 0, 8_192]);
+        let wide = render(&mut app, 160, 50);
+        assert_has(&text_of(&wide), "IT 8ch");
+        assert!(header_row(&wide).contains("Ch8 "), "{}", text_of(&wide));
+        assert_meter_under_channel(&wide, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+        assert_meter_under_channel(&wide, "Ch8 ", '█', Color::Rgb(255, 160, 196));
+        let cramped = render(&mut app, 80, 30);
+        assert!(
+            header_row(&cramped).contains("Ch1 "),
+            "{}",
+            text_of(&cramped)
+        );
+        assert!(
+            header_row(&cramped).contains("Ch6 "),
+            "{}",
+            text_of(&cramped)
+        );
+        assert!(
+            !header_row(&cramped).contains("Ch8"),
+            "{}",
+            text_of(&cramped)
+        );
+        assert_meter_under_channel(&cramped, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+    }
+
+    fn peg_channels(app: &mut App, peaks: &[u16]) {
+        let mut four = [0u16; 4];
+        for (slot, peak) in four.iter_mut().zip(peaks) {
+            *slot = *peak;
+        }
         let mut stereo = [0i16; crate::viz::WINDOW * 2];
         for index in 0..crate::viz::WINDOW {
             let sample = ((index as f32 * 0.15).sin() * 14_000.0) as i16;
             stereo[index * 2] = sample;
             stereo[index * 2 + 1] = sample / 2;
         }
-        crate::viz::VizSnapshot {
-            stereo,
-            peaks: [6000, 2500, 4200, 800],
-            rate: 44_100,
-            gen: 1,
+        for gen in 1..=3 {
+            app.tick_viz(
+                Some(&crate::viz::VizSnapshot {
+                    stereo,
+                    peaks: four,
+                    rate: 44_100,
+                    gen,
+                }),
+                0.08,
+            );
+            app.viz.push_extra_peaks(peaks, 0.08);
         }
+    }
+
+    fn wide_song(channels: usize) -> crate::Song {
+        crate::Song {
+            title: "Wide".to_string(),
+            tracker: String::new(),
+            format: crate::track::Format::Xm,
+            channels,
+            orders: vec![0],
+            restart: 0,
+            patterns: vec![crate::track::Pattern::empty(64, channels)],
+            instruments: Vec::new(),
+            samples: Vec::new(),
+            linear: true,
+            initial_speed: 6,
+            initial_tempo: 125,
+            initial_global_volume: 64,
+            global_volume_max: 64,
+            initial_pan: vec![128; channels],
+            initial_channel_volume: vec![64; channels],
+            initial_mute: vec![false; channels],
+            instrument_mode: true,
+            old_effects: false,
+            compatible_gxx: false,
+        }
+    }
+
+    fn load_track(rel: &str) -> crate::Song {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        match crate::open_path(&path).unwrap_or_else(|err| panic!("load {rel}: {err}")) {
+            crate::Opened::Track(song) => song,
+            crate::Opened::Mod(_) => panic!("{rel} parsed as a module"),
+        }
+    }
+
+    fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut out = String::new();
+        for x in 0..buf.area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out
+    }
+
+    fn find_row(buf: &ratatui::buffer::Buffer, needle: &str) -> u16 {
+        for y in 0..buf.area.height {
+            if row_text(buf, y).contains(needle) {
+                return y;
+            }
+        }
+        panic!("missing {needle:?} in:\n{}", text_of(buf));
+    }
+
+    fn find_on_row(buf: &ratatui::buffer::Buffer, y: u16, needle: &str) -> Option<u16> {
+        let chars: Vec<char> = needle.chars().collect();
+        let width = usize::from(buf.area.width);
+        if chars.is_empty() || chars.len() > width {
+            return None;
+        }
+        for x in 0..=width - chars.len() {
+            let matched = chars
+                .iter()
+                .enumerate()
+                .all(|(index, ch)| buf[(x as u16 + index as u16, y)].symbol().starts_with(*ch));
+            if matched {
+                return Some(x as u16);
+            }
+        }
+        None
+    }
+
+    fn header_y(buf: &ratatui::buffer::Buffer) -> u16 {
+        let samples = find_row(buf, "Samples");
+        for y in 0..samples {
+            let text = row_text(buf, y);
+            if text.contains("Ch1") || text.contains("Ch 1") {
+                return y;
+            }
+        }
+        panic!("no channel header in:\n{}", text_of(buf));
+    }
+
+    fn header_row(buf: &ratatui::buffer::Buffer) -> String {
+        row_text(buf, header_y(buf))
+    }
+
+    fn meter_row(buf: &ratatui::buffer::Buffer) -> u16 {
+        find_row(buf, "Samples").saturating_sub(2)
+    }
+
+    fn assert_meter_under_channel(
+        buf: &ratatui::buffer::Buffer,
+        label: &str,
+        glyph: char,
+        color: Color,
+    ) {
+        let x = find_on_row(buf, header_y(buf), label).unwrap_or_else(|| {
+            panic!(
+                "missing {label:?} on the header\n{}\n{}",
+                header_row(buf),
+                text_of(buf)
+            )
+        });
+        let y = meter_row(buf);
+        let cell = &buf[(x, y)];
+        assert_eq!(
+            cell.symbol(),
+            glyph.to_string(),
+            "meter under {label} at ({x},{y})\n{}",
+            text_of(buf)
+        );
+        assert_eq!(cell.fg, color, "meter color under {label}");
+        if y > header_y(buf) + 1 {
+            let above = buf[(x, y - 1)].symbol();
+            assert!(
+                above != "█" && above != "▁" && above != "▇",
+                "meter strip is taller than one row under {label}: {above}"
+            );
+        }
+    }
+
+    fn meter_eighths(buf: &ratatui::buffer::Buffer, label: &str) -> usize {
+        let x = find_on_row(buf, header_y(buf), label).expect(label);
+        let y = meter_row(buf);
+        (0..10u16)
+            .map(|offset| eighths_of(buf[(x + offset, y)].symbol()))
+            .sum()
+    }
+
+    fn eighths_of(symbol: &str) -> usize {
+        match symbol {
+            "▏" => 1,
+            "▎" => 2,
+            "▍" => 3,
+            "▌" => 4,
+            "▋" => 5,
+            "▊" => 6,
+            "▉" => 7,
+            "█" => 8,
+            _ => 0,
+        }
+    }
+
+    fn assert_side_by_side(buf: &ratatui::buffer::Buffer, left_title: &str, right_title: &str) {
+        let y = find_row(buf, left_title);
+        let row = row_text(buf, y);
+        let left = row.find(left_title).expect(&row);
+        let right = row.find(right_title).unwrap_or_else(|| panic!("{row}"));
+        assert!(left < right, "{row}");
+        assert_eq!(buf[(0, y)].symbol(), "┌", "{row}");
+        let end = buf.area.width - 1;
+        assert_eq!(buf[(end, y)].symbol(), "┐", "{row}");
+        let mid = usize::from(buf.area.width) / 2;
+        let split = (mid.saturating_sub(1)..=mid + 1)
+            .find(|x| buf[(*x as u16, y)].symbol() == "┌")
+            .unwrap_or_else(|| panic!("no split on {row}"));
+        assert_eq!(buf[(split as u16 - 1, y)].symbol(), "┐", "{row}");
+        let spectrum_w = usize::from(buf.area.width) - split;
+        assert!(
+            (split as i32 - spectrum_w as i32).abs() <= 1,
+            "left {split} right {spectrum_w} on {row}"
+        );
+        let bottom = find_row(buf, "Stop") - 1;
+        assert_eq!(buf[(0, bottom)].symbol(), "└", "{}", row_text(buf, bottom));
+        assert_eq!(buf[(end, bottom)].symbol(), "┘");
+        assert_eq!(buf[(split as u16, bottom)].symbol(), "└");
+    }
+
+    fn assert_full_width_samples(buf: &ratatui::buffer::Buffer) {
+        let y = find_row(buf, "Samples");
+        let row = row_text(buf, y);
+        assert_eq!(buf[(0, y)].symbol(), "┌", "{row}");
+        assert_eq!(buf[(buf.area.width - 1, y)].symbol(), "┐", "{row}");
+        assert_eq!(row.chars().filter(|ch| *ch == '┌').count(), 1, "{row}");
+    }
+
+    fn assert_closed_boxes(buf: &ratatui::buffer::Buffer) {
+        for title in ["Song", "Pattern", "Samples"] {
+            let y = find_box_row(buf, title);
+            assert_eq!(buf[(0, y)].symbol(), "┌", "{title}");
+            assert_eq!(
+                buf[(buf.area.width - 1, y)].symbol(),
+                "┐",
+                "{title} {}",
+                row_text(buf, y)
+            );
+        }
+    }
+
+    fn find_box_row(buf: &ratatui::buffer::Buffer, title: &str) -> u16 {
+        for y in 0..buf.area.height {
+            if buf[(0, y)].symbol() != "┌" {
+                continue;
+            }
+            let text = row_text(buf, y);
+            let named = text
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .any(|word| word == title);
+            if named {
+                return y;
+            }
+        }
+        panic!("no {title} box in:\n{}", text_of(buf));
+    }
+
+    fn assert_spectrum_is_bars_only(buf: &ratatui::buffer::Buffer) {
+        let y = find_row(buf, "Spectrum");
+        let mid = usize::from(buf.area.width) / 2;
+        let left = (mid.saturating_sub(1)..=mid + 1)
+            .find(|x| buf[(*x as u16, y)].symbol() == "┌")
+            .unwrap_or_else(|| panic!("{}", row_text(buf, y))) as u16;
+        let right = buf.area.width - 1;
+        let bottom = find_row(buf, "Stop") - 1;
+        let mut blocks = 0usize;
+        for row in (y + 1)..bottom {
+            for x in (left + 1)..right {
+                let symbol = buf[(x, row)].symbol();
+                assert!(
+                    matches!(symbol, " " | "▁" | "▂" | "▃" | "▄" | "▅" | "▆" | "▇" | "█"),
+                    "spectrum glyph {symbol:?} at ({x},{row})\n{}",
+                    text_of(buf)
+                );
+                if matches!(symbol, "▁" | "▂" | "▃" | "▄" | "▅" | "▆" | "▇" | "█") {
+                    blocks += 1;
+                }
+            }
+        }
+        assert!(blocks > 0, "spectrum pane was empty\n{}", text_of(buf));
+    }
+
+    fn meter_rows_above_border(buf: &ratatui::buffer::Buffer) -> usize {
+        let border = find_row(buf, "Samples") - 1;
+        let meter = meter_row(buf);
+        assert_eq!(buf[(0, border)].symbol(), "└");
+        assert_eq!(meter + 1, border);
+        1
     }
 }
