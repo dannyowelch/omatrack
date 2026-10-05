@@ -502,6 +502,14 @@ impl AudioOutput {
         Ok(())
     }
 
+    /// Replace the XM or IT song the callback is mixing.
+    pub fn replace_track(&self, song: &crate::track::Song) {
+        let mut shared = lock_shared(&self.shared);
+        if let Some(mix) = shared.track.as_mut() {
+            mix.song = song.clone();
+        }
+    }
+
     /// Replace the song the callback is mixing. Preview is left alone.
     pub fn replace_module(&self, module: &Module) {
         let mut shared = lock_shared(&self.shared);

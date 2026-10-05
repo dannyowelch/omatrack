@@ -43,6 +43,10 @@ pub enum Field {
     ParamHigh,
     /// Low nibble of the effect parameter.
     ParamLow,
+    /// High nibble of an XM/IT volume column. ProTracker cells do not use it.
+    VolumeHigh,
+    /// Low nibble of an XM/IT volume column. ProTracker cells do not use it.
+    VolumeLow,
 }
 
 impl Field {
@@ -58,6 +62,8 @@ impl Field {
             Self::Effect => 3,
             Self::ParamHigh => 4,
             Self::ParamLow => 5,
+            Self::VolumeHigh => 6,
+            Self::VolumeLow => 7,
         }
     }
 
@@ -80,8 +86,37 @@ impl Field {
             Self::SampleHigh | Self::SampleLow => "Sample",
             Self::Effect => "Effect",
             Self::ParamHigh | Self::ParamLow => "Param",
+            Self::VolumeHigh | Self::VolumeLow => "Volume",
         }
     }
+}
+
+/// Move between the eight columns of an XM/IT cell.
+///
+/// Note, instrument, volume, effect, parameter. `channels` is the song width.
+pub fn shift_track_field(
+    channel: usize,
+    channels: usize,
+    field: Field,
+    delta: isize,
+) -> (usize, Field) {
+    const FIELDS: [Field; 8] = [
+        Field::Note,
+        Field::SampleHigh,
+        Field::SampleLow,
+        Field::VolumeHigh,
+        Field::VolumeLow,
+        Field::Effect,
+        Field::ParamHigh,
+        Field::ParamLow,
+    ];
+    let channels = channels.max(1);
+    let width = channels * FIELDS.len();
+    let field_index = FIELDS.iter().position(|item| *item == field).unwrap_or(0);
+    let current = channel.min(channels - 1) * FIELDS.len() + field_index;
+    let last = width - 1;
+    let next = (current as isize + delta).clamp(0, last as isize) as usize;
+    (next / FIELDS.len(), FIELDS[next % FIELDS.len()])
 }
 
 /// Where a pattern edit lands, plus the edit step used to move on.
@@ -429,6 +464,7 @@ impl Editor {
             Field::Effect => cell.effect = 0,
             Field::ParamHigh => cell.param &= 0x0F,
             Field::ParamLow => cell.param &= 0xF0,
+            Field::VolumeHigh | Field::VolumeLow => return false,
         }
         let before = self.undo_len();
         self.write_cell(
@@ -1065,6 +1101,7 @@ fn apply_digit(cell: &mut Cell, field: Field, digit: u8) -> bool {
             }
             true
         }
+        Field::VolumeHigh | Field::VolumeLow => false,
     }
 }
 
@@ -1110,7 +1147,7 @@ fn cursor_after_digit(cursor: PatternCursor, step: u8) -> PatternCursor {
             channel: cursor.channel,
             field: Field::Note,
         },
-        Field::Note => cursor,
+        Field::Note | Field::VolumeHigh | Field::VolumeLow => cursor,
     }
 }
 

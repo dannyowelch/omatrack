@@ -43,7 +43,7 @@ const HELP_LINES: &[&str] = &[
     "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
     "Order: Up/Down edits the slot. N new. Ctrl-Right adds one, not in order.",
-    "Ctrl-T title. Samples: R renames. XM/IT read-only. i import WAV, Ctrl-G render.",
+    "Ctrl-T title. Samples: R renames. i import WAV, Ctrl-G render.",
     "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
     "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
 ];
@@ -1182,8 +1182,13 @@ fn status_text(app: &App) -> String {
         } else {
             "--".to_string()
         };
+        let field = if app.editing {
+            format!("  {}", app.field.label())
+        } else {
+            String::new()
+        };
         return format!(
-            "{}  inst {:02}  {volume}  {}  read-only",
+            "{}  inst {:02}  {volume}  {}{field}",
             crate::track::format_note(cell.note),
             cell.instrument,
             crate::track::format_effect(song.format, cell.effect, cell.param),
@@ -1395,13 +1400,14 @@ fn draw_import_prompt(frame: &mut Frame, area: Rect, prompt: &ImportPrompt, them
 }
 
 fn draw_field_prompt(frame: &mut Frame, area: Rect, prompt: &FieldPrompt, theme: Theme) {
-    let (title, hint) = match prompt.kind {
+    let (title, default_hint) = match prompt.kind {
         FieldKind::Volume => ("Volume", "0..=64"),
         FieldKind::Finetune => ("Finetune", "-8..=7"),
         FieldKind::Loop => ("Loop", "start length, in bytes; length 0 turns it off"),
         FieldKind::Trim => ("Trim", "start end, end exclusive, even bytes"),
         FieldKind::CopyTo => ("Copy sample", "destination slot 1..=31"),
     };
+    let hint = prompt.hint.as_deref().unwrap_or(default_hint);
     let lines = [
         hint.to_string(),
         format!("> {}", prompt.buffer),
@@ -2345,6 +2351,8 @@ lighter_background = "#24283b"
             instrument_mode: true,
             old_effects: false,
             compatible_gxx: false,
+            compat: 0,
+            load_notes: crate::track::LoadNotes::default(),
         }
     }
 

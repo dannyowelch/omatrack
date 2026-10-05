@@ -31,9 +31,16 @@ Format is detected from the header
 or
 .BR IMPM ),
 not only from the extension.
-XM and IT songs are shown and played, including more than four channels, and are read-only: the editor will not change them, and saving them is not supported, so the original file is left untouched.
-.B .mod
-remains the only format that can be edited and saved.
+XM and IT songs are shown, played, edited, and saved, including more than four channels.
+.B Ctrl-S
+writes the format of the open file.
+Save As uses the extension
+.RB ( .mod ,
+.BR .xm ,
+or
+.BR .it ).
+A conversion that cannot be stored exactly is described on the status line.
+The open song is left unchanged when the extension is missing or the file cannot be written.
 With no file it reopens the last module, including
 .B .xm
 and
@@ -145,8 +152,29 @@ save,
 save as.
 .TP
 .B Ctrl-S
-Save.
+Save in the format of the open file.
+An
+.B .xm
+stays XM, an
+.B .it
+stays IT, and a
+.B .mod
+stays a module.
+XM and IT write every pattern, including ones the order list does not reference.
+A
+.B .mod
+still stores only patterns through the highest order entry.
 An untitled module asks for a path.
+Save As
+.RB ( Ctrl-F ,
+then
+.BR a )
+picks
+.BR .mod ,
+.BR .xm ,
+or
+.B .it
+from the extension.
 .TP
 .B Ctrl-Z / Ctrl-Y
 Undo / redo.
@@ -210,9 +238,12 @@ the order list does not reference.
 Changing a slot does not delete pattern data.
 Undo and redo restore the slot or an appended pattern.
 Playback follows the order list, not the pattern on screen.
-XM and IT files are not edited:
 .B Ctrl-Right
-past the last pattern says so and does not add one.
+past the last pattern appends one blank pattern for
+.BR .mod ,
+.BR .xm ,
+and
+.BR .it .
 The bottom row lists shortcuts for the focused pane and drops the ones
 that do not fit.
 A

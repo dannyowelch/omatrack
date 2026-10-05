@@ -439,7 +439,12 @@ pub struct App {
     pub(crate) overlay: Overlay,
     pub(crate) selection: Option<Selection>,
     clipboard: Clipboard,
+    /// Cells copied from an XM or IT pattern.
+    track_clip: Vec<Vec<crate::track::Cell>>,
+    /// One-sample module used to audition an XM/IT sample through the module mixer.
+    pub(crate) audition_scratch: Option<Module>,
     pub(crate) editor: Editor,
+    track_hist: crate::track::TrackHistory,
     quit: bool,
     /// Spectrum, meters, or the scope. The spectrum is up at launch.
     pub(crate) viz_mode: VizMode,
@@ -490,7 +495,10 @@ impl App {
             overlay: Overlay::None,
             selection: None,
             clipboard: Clipboard::default(),
+            track_clip: Vec::new(),
+            audition_scratch: None,
             editor: Editor::new(),
+            track_hist: crate::track::TrackHistory::new(),
             quit: false,
             viz_mode: VizMode::Panel,
             viz: VizState::new(),
@@ -603,34 +611,131 @@ impl App {
 
     /// The document has edits since the last successful save.
     pub fn is_dirty(&self) -> bool {
-        self.editor.is_dirty()
+        if self.track.is_some() {
+            self.track_hist.is_dirty()
+        } else {
+            self.editor.is_dirty()
+        }
     }
 
-    /// Write the module to the path it was opened from.
+    /// Write the open song to the path it was opened from.
     ///
-    /// XM and IT are not written. The original file is left untouched.
-    /// The returned string is the status line. When the pattern list runs past
-    /// the highest order entry, those patterns stay in memory and the message
-    /// says they were not written: a `.mod` stores `max(order) + 1` patterns.
+    /// The file keeps its format: an `.xm` stays XM, an `.it` stays IT, and a
+    /// `.mod` stays a module. XM and IT write every pattern, including ones
+    /// the order list does not reference. A `.mod` still stores only
+    /// `max(order) + 1` patterns; the rest stay in memory and the message
+    /// says so.
     pub fn save(&mut self) -> Result<String, String> {
-        if self.track.is_some() {
-            return Err(crate::track::SAVE_UNSUPPORTED.to_string());
-        }
         if self.path.as_os_str().is_empty() {
             return Err("there is no file to save".to_string());
         }
-        let omitted = self
-            .module
-            .save_stored(&self.path)
-            .map_err(|err| err.to_string())?;
-        self.editor.mark_saved();
-        self.note_unstored_patterns(omitted);
-        let name = self
-            .path
+        let format = self.open_format();
+        let path = self.path.clone();
+        self.write_format(&path, format)
+    }
+
+    /// Write the song to `path`. The extension picks `.mod`, `.xm`, or `.it`.
+    pub(crate) fn save_as(&mut self, path: std::path::PathBuf) -> Result<String, String> {
+        let format = crate::track::SaveFormat::from_path(&path).ok_or_else(|| {
+            "Save As needs a .mod, .xm, or .it extension. Nothing was written.".to_string()
+        })?;
+        self.write_format(&path, format)
+    }
+
+    fn open_format(&self) -> crate::track::SaveFormat {
+        match self.track.as_ref().map(|song| song.format) {
+            Some(crate::track::Format::Xm) => crate::track::SaveFormat::Xm,
+            Some(crate::track::Format::It) => crate::track::SaveFormat::It,
+            None => crate::track::SaveFormat::Mod,
+        }
+    }
+
+    fn write_format(
+        &mut self,
+        path: &std::path::Path,
+        format: crate::track::SaveFormat,
+    ) -> Result<String, String> {
+        let current = self.open_format();
+        let converting = current != format;
+        let saved = if let Some(song) = &self.track {
+            crate::track::save_song_as(song, format).map_err(|err| err.to_string())?
+        } else {
+            crate::track::save_module(&self.module, format).map_err(|err| err.to_string())?
+        };
+        std::fs::write(path, &saved.bytes)
+            .map_err(|err| format!("Could not write {}: {err}", path.display()))?;
+        let pattern_len = if let Some(song) = &self.track {
+            song.patterns.len()
+        } else {
+            self.module.patterns.len()
+        };
+        let name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .unwrap_or("module");
-        Ok(save_status(name, omitted, self.module.patterns.len()))
+            .unwrap_or("module")
+            .to_string();
+        self.path = path.to_path_buf();
+        let omitted = if format == crate::track::SaveFormat::Mod {
+            saved.omitted_from
+        } else {
+            None
+        };
+        if converting {
+            self.reload_written(&saved.bytes)?;
+        } else if self.track.is_some() {
+            self.track_hist.mark_saved();
+        } else {
+            self.editor.mark_saved();
+        }
+        let mut warnings = saved.warnings;
+        if let Some(detail) = unstored_detail(omitted, pattern_len) {
+            warnings.push(detail);
+        }
+        self.note_unstored_patterns(if converting { None } else { omitted });
+        if !warnings.is_empty() {
+            self.notice = Some(warnings.join(" "));
+        } else if self.notice.as_deref().is_some_and(is_unstored_notice) {
+            self.notice = None;
+        }
+        if warnings.is_empty() || omitted.is_some() {
+            Ok(save_status(&name, omitted, pattern_len))
+        } else {
+            Ok(format!("Saved {name}. {}", warnings.join(" ")))
+        }
+    }
+
+    fn reload_written(&mut self, bytes: &[u8]) -> Result<(), String> {
+        match crate::open_bytes(bytes).map_err(|err| err.to_string())? {
+            crate::Opened::Mod(module) => {
+                self.module = module;
+                self.track = None;
+                self.editor = Editor::new();
+                self.editor.mark_saved();
+                self.track_hist = crate::track::TrackHistory::new();
+                self.track_clip.clear();
+            }
+            crate::Opened::Track(song) => {
+                self.module = Module::new(crate::module::Tag::Mk);
+                self.track = Some(song);
+                self.editor = Editor::new();
+                self.track_hist = crate::track::TrackHistory::new();
+                self.track_hist.mark_saved();
+                self.clipboard = Clipboard::default();
+            }
+        }
+        self.editing = false;
+        self.selection = None;
+        self.clamp_position();
+        let channels = self.channel_count();
+        self.muted = vec![false; channels];
+        if let Some(song) = &self.track {
+            for (index, mute) in song.initial_mute.iter().enumerate() {
+                if let Some(slot) = self.muted.get_mut(index) {
+                    *slot = *mute;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Remember that a `.mod` could not hold patterns above the highest order entry.
@@ -666,11 +771,6 @@ impl App {
         } else {
             SAMPLE_COUNT
         }
-    }
-
-    /// XM and IT stay read-only. `.mod` does not.
-    pub(crate) fn is_readonly(&self) -> bool {
-        self.track.is_some()
     }
 
     /// Keep the cursor's channel inside the drawn window.
@@ -741,13 +841,6 @@ impl App {
                 }
             }
             Command::ToggleEdit => {
-                if self.is_readonly() {
-                    self.editing = false;
-                    self.set_error(
-                        "XM and IT songs are read-only. Pattern editing is not supported yet.",
-                    );
-                    return Outcome::None;
-                }
                 self.editing = !self.editing;
                 if self.editing {
                     self.focus = Focus::Pattern;
@@ -1002,14 +1095,16 @@ impl App {
         let channels = song.channels;
         let label = song.format.label();
         let message = format!("Opened {name} ({channels} channels, {label})");
+        let notes = song.load_notes.summary();
         self.track = Some(song);
         self.module = Module::new(crate::module::Tag::Mk);
         self.path = path;
         self.editor = Editor::new();
+        self.track_hist = crate::track::TrackHistory::new();
         self.clipboard = Clipboard::default();
+        self.track_clip.clear();
         self.finish_replaced(&message);
-        self.notice =
-            Some("XM and IT are read-only. Saving this format is not supported yet.".to_string());
+        self.notice = notes;
         Outcome::DocumentReplaced
     }
 
@@ -1034,7 +1129,16 @@ impl App {
                 self.nudge_selection();
             }
             Command::MoveField(delta) => {
-                let (channel, field) = crate::edit::shift_field(self.channel, self.field, delta);
+                let (channel, field) = if self.track.is_some() {
+                    crate::edit::shift_track_field(
+                        self.channel,
+                        self.channel_count(),
+                        self.field,
+                        delta,
+                    )
+                } else {
+                    crate::edit::shift_field(self.channel, self.field, delta)
+                };
                 self.channel = channel;
                 self.field = field;
                 self.nudge_selection();
@@ -1086,9 +1190,8 @@ impl App {
     }
 
     fn apply_change(&mut self, command: Command) -> Outcome {
-        if self.is_readonly() {
-            self.set_error("XM and IT songs are read-only. Pattern editing is not supported yet.");
-            return Outcome::None;
+        if self.track.is_some() {
+            return self.apply_track_change(command);
         }
         let before = self.editor.undo_len();
         match command {
@@ -1284,6 +1387,340 @@ impl App {
         }
     }
 
+    fn apply_track_change(&mut self, command: Command) -> Outcome {
+        use crate::track::edit::{self, TrackField};
+        let pattern = self.view_pattern;
+        let row = self.row;
+        let channel = self.channel;
+        let field = track_field(self.field);
+        match command {
+            Command::EnterNote(semitone) => self.enter_track_note(semitone),
+            Command::EnterDigit(digit) => {
+                let step = self.step;
+                let changed = self.edit_track(|song| {
+                    edit::enter_digit(song, pattern, row, channel, field, digit);
+                });
+                if changed && matches!(field, TrackField::ParamLow | TrackField::VolumeLow) {
+                    self.row =
+                        crate::edit::advance_row(row, step).min(self.row_count().saturating_sub(1));
+                    self.field = if field == TrackField::VolumeLow {
+                        Field::Effect
+                    } else {
+                        Field::Note
+                    };
+                } else if changed {
+                    self.field = track_field_after(self.field);
+                }
+                self.finish_track_edit(changed)
+            }
+            Command::ClearUnderCursor => {
+                let changed = self.edit_track(|song| {
+                    edit::clear_field(song, pattern, row, channel, field);
+                });
+                self.finish_track_edit(changed)
+            }
+            Command::BackspaceLine => {
+                let step = self.step;
+                let mut next_row = row;
+                let changed = self.edit_track(|song| {
+                    if let Some(target) = edit::clear_above(song, pattern, row, channel, step) {
+                        next_row = target;
+                    }
+                });
+                if changed {
+                    self.row = next_row;
+                }
+                self.finish_track_edit(changed)
+            }
+            Command::InsertChannelRow => self.track_shift(true, false),
+            Command::DeleteChannelRow => self.track_shift(false, false),
+            Command::InsertPatternRow => self.track_shift(true, true),
+            Command::DeletePatternRow => self.track_shift(false, true),
+            Command::ClearChannel => {
+                let changed = self.edit_track(|song| {
+                    edit::clear_channel(song, pattern, channel);
+                });
+                self.finish_track_edit(changed)
+            }
+            Command::ClearPattern => {
+                let changed = self.edit_track(|song| {
+                    edit::clear_pattern(song, pattern);
+                });
+                self.selection = None;
+                self.finish_track_edit(changed)
+            }
+            Command::ToggleBlock => {
+                if self.selection.is_some() {
+                    self.selection = None;
+                } else {
+                    self.selection = Some(Selection {
+                        pattern: self.view_pattern,
+                        anchor_row: self.row,
+                        anchor_channel: self.channel,
+                        row: self.row,
+                        channel: self.channel,
+                    });
+                }
+                Outcome::None
+            }
+            Command::SelectAll => {
+                self.selection = Some(Selection {
+                    pattern: self.view_pattern,
+                    anchor_row: 0,
+                    anchor_channel: 0,
+                    row: self.row_count().saturating_sub(1),
+                    channel: self.channel_count().saturating_sub(1),
+                });
+                Outcome::None
+            }
+            Command::ClearBlock => {
+                self.selection = None;
+                Outcome::None
+            }
+            Command::Copy => {
+                self.copy_track_block();
+                Outcome::None
+            }
+            Command::Cut => {
+                let range = self.active_range();
+                self.copy_track_block();
+                let changed = self.edit_track(|song| {
+                    for row in range.row_lo..=range.row_hi {
+                        for channel in range.channel_lo..=range.channel_hi {
+                            if let Some(cell) = song
+                                .patterns
+                                .get_mut(pattern)
+                                .and_then(|pattern| pattern.rows.get_mut(row))
+                                .and_then(|row| row.get_mut(channel))
+                            {
+                                *cell = crate::track::Cell::empty();
+                            }
+                        }
+                    }
+                });
+                self.selection = None;
+                self.message = Some(format!("Cut {}x{}", range.rows(), range.channels()));
+                self.finish_track_edit(changed)
+            }
+            Command::Paste => {
+                if self.track_clip.is_empty() {
+                    self.message = Some("Clipboard is empty".to_string());
+                    return Outcome::None;
+                }
+                let clip = self.track_clip.clone();
+                let changed = self.edit_track(|song| {
+                    for (offset, line) in clip.iter().enumerate() {
+                        for (column, cell) in line.iter().enumerate() {
+                            let dest_row = row.saturating_add(offset);
+                            let dest_channel = channel.saturating_add(column);
+                            if let Some(slot) = song
+                                .patterns
+                                .get_mut(pattern)
+                                .and_then(|pattern| pattern.rows.get_mut(dest_row))
+                                .and_then(|row| row.get_mut(dest_channel))
+                            {
+                                *slot = *cell;
+                            }
+                        }
+                    }
+                });
+                self.message = Some("Pasted".to_string());
+                self.finish_track_edit(changed)
+            }
+            Command::Transpose(semitones) => {
+                let range = self.active_range();
+                let changed = self.edit_track(|song| {
+                    for row in range.row_lo..=range.row_hi {
+                        for channel in range.channel_lo..=range.channel_hi {
+                            if let Some(cell) = song
+                                .patterns
+                                .get_mut(pattern)
+                                .and_then(|pattern| pattern.rows.get_mut(row))
+                                .and_then(|row| row.get_mut(channel))
+                            {
+                                edit::transpose(cell, semitones);
+                            }
+                        }
+                    }
+                });
+                self.finish_track_edit(changed)
+            }
+            Command::Undo => self.restore_edit(false),
+            Command::Redo => self.restore_edit(true),
+            Command::OrderPattern(delta) => {
+                let pos = self.order_pos;
+                let changed = self.edit_track(|song| {
+                    edit::bump_order(song, pos, delta);
+                });
+                if changed {
+                    self.sync_view_to_order();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("N makes a new pattern".to_string());
+                    Outcome::None
+                }
+            }
+            Command::InsertOrder => {
+                let pos = self.order_pos;
+                let changed = self.edit_track(|song| {
+                    edit::insert_order(song, pos);
+                });
+                if changed {
+                    self.sync_view_to_order();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("The order list is full".to_string());
+                    Outcome::None
+                }
+            }
+            Command::DeleteOrder => {
+                let pos = self.order_pos;
+                let changed = self.edit_track(|song| {
+                    edit::delete_order(song, pos);
+                });
+                if changed {
+                    self.sync_view_to_order();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("The song keeps one position".to_string());
+                    Outcome::None
+                }
+            }
+            Command::SongLength(delta) => {
+                let next = self.song_len() as i32 + delta;
+                let next = usize::try_from(next.clamp(1, 256)).unwrap_or(1);
+                let changed = self.edit_track(|song| {
+                    edit::set_length(song, next);
+                });
+                if changed {
+                    self.clamp_position();
+                    Outcome::Edited
+                } else {
+                    self.message = Some("Song length stays in 1..=256".to_string());
+                    Outcome::None
+                }
+            }
+            Command::NewPattern => {
+                let pos = self.order_pos;
+                let changed = self.edit_track(|song| {
+                    edit::new_pattern(song, pos);
+                });
+                if changed {
+                    self.sync_view_to_order();
+                    self.message = Some(format!("Pattern {:02}", self.view_pattern));
+                    Outcome::Edited
+                } else {
+                    self.message = Some("Already at 256 patterns".to_string());
+                    Outcome::None
+                }
+            }
+            Command::BeginTitle => {
+                let title = self
+                    .track
+                    .as_ref()
+                    .map(|song| song.title.clone())
+                    .unwrap_or_default();
+                self.overlay = Overlay::Text {
+                    target: TextTarget::Title,
+                    buffer: title,
+                };
+                Outcome::None
+            }
+            Command::BeginSampleName => {
+                let index = self.sample;
+                let name = self
+                    .track
+                    .as_ref()
+                    .and_then(|song| song.samples.get(index))
+                    .map(|sample| sample.name.clone())
+                    .unwrap_or_default();
+                self.overlay = Overlay::Text {
+                    target: TextTarget::Sample(index),
+                    buffer: name,
+                };
+                Outcome::None
+            }
+            _ => Outcome::None,
+        }
+    }
+
+    fn enter_track_note(&mut self, semitone: u8) -> Outcome {
+        let note = self
+            .octave
+            .saturating_mul(12)
+            .saturating_add(semitone)
+            .saturating_add(1);
+        if note == 0 || note > 120 {
+            return Outcome::None;
+        }
+        let instrument = u8::try_from(self.sample.saturating_add(1)).unwrap_or(255);
+        let pattern = self.view_pattern;
+        let row = self.row;
+        let channel = self.channel;
+        let step = self.step;
+        let changed = self.edit_track(|song| {
+            crate::track::edit::enter_note(song, pattern, row, channel, note, instrument);
+        });
+        if changed {
+            self.row = crate::edit::advance_row(row, step).min(self.row_count().saturating_sub(1));
+            self.field = Field::Note;
+            self.nudge_selection();
+        }
+        self.finish_track_edit(changed)
+    }
+
+    fn track_shift(&mut self, insert: bool, whole_row: bool) -> Outcome {
+        let pattern = self.view_pattern;
+        let row = self.row;
+        let channel = self.channel;
+        let changed = self.edit_track(|song| {
+            if whole_row {
+                crate::track::edit::shift_row(song, pattern, row, insert);
+            } else {
+                crate::track::edit::shift_channel(song, pattern, channel, row, insert);
+            }
+        });
+        self.finish_track_edit(changed)
+    }
+
+    fn finish_track_edit(&mut self, changed: bool) -> Outcome {
+        if changed {
+            Outcome::Edited
+        } else {
+            Outcome::None
+        }
+    }
+
+    pub(crate) fn edit_track(&mut self, change: impl FnOnce(&mut crate::Song)) -> bool {
+        let Some(mut song) = self.track.take() else {
+            return false;
+        };
+        let changed = self.track_hist.edit(&mut song, change);
+        self.track = Some(song);
+        changed
+    }
+
+    fn copy_track_block(&mut self) {
+        let Some(song) = &self.track else {
+            return;
+        };
+        let range = self.active_range();
+        let mut rows = Vec::new();
+        for row in range.row_lo..=range.row_hi {
+            let mut line = Vec::new();
+            for channel in range.channel_lo..=range.channel_hi {
+                line.push(
+                    song.cell(self.view_pattern, row, channel)
+                        .unwrap_or_else(crate::track::Cell::empty),
+                );
+            }
+            rows.push(line);
+        }
+        self.track_clip = rows;
+        self.selection = None;
+        self.message = Some(format!("Copied {}x{}", range.rows(), range.channels()));
+    }
+
     fn enter_note(&mut self, semitone: u8) -> Outcome {
         let Some(period) = period_at(self.octave, semitone) else {
             return Outcome::None;
@@ -1309,6 +1746,35 @@ impl App {
         let Overlay::Text { target, buffer } = self.overlay.clone() else {
             return Outcome::None;
         };
+        if self.track.is_some() {
+            let text = buffer;
+            let missing = match target {
+                TextTarget::Title => false,
+                TextTarget::Sample(index) => self
+                    .track
+                    .as_ref()
+                    .and_then(|song| song.samples.get(index))
+                    .is_none(),
+            };
+            if missing {
+                self.message = Some("That sample slot does not exist".to_string());
+                return Outcome::None;
+            }
+            let changed = self.edit_track(|song| match target {
+                TextTarget::Title => song.title = text.clone(),
+                TextTarget::Sample(index) => {
+                    if let Some(sample) = song.samples.get_mut(index) {
+                        sample.name = text.clone();
+                    }
+                }
+            });
+            self.overlay = Overlay::None;
+            return if changed {
+                Outcome::Edited
+            } else {
+                Outcome::None
+            };
+        }
         let result = match target {
             TextTarget::Title => self.editor.set_title(&mut self.module, &buffer),
             TextTarget::Sample(index) => {
@@ -1333,8 +1799,16 @@ impl App {
             return;
         };
         let max = match target {
-            TextTarget::Title => TITLE_LEN,
-            TextTarget::Sample(_) => SAMPLE_NAME_LEN,
+            TextTarget::Title => match self.track.as_ref().map(|song| song.format) {
+                Some(crate::track::Format::It) => 26,
+                Some(crate::track::Format::Xm) => 20,
+                None => TITLE_LEN,
+            },
+            TextTarget::Sample(_) => match self.track.as_ref().map(|song| song.format) {
+                Some(crate::track::Format::It) => 26,
+                Some(crate::track::Format::Xm) => 22,
+                None => SAMPLE_NAME_LEN,
+            },
         };
         if buffer.chars().count() >= max || !is_name_char(ch) {
             return;
@@ -1395,6 +1869,39 @@ impl App {
     /// Appending a pattern does not change the slot, so undo and redo stay on
     /// the tail of the pattern list instead of jumping back to the slot.
     fn restore_edit(&mut self, forward: bool) -> Outcome {
+        if self.track.is_some() {
+            let before_slot = self.order_pattern();
+            let before_len = self.pattern_total();
+            let viewed_tail = self.view_pattern + 1 >= before_len;
+            let Some(mut song) = self.track.take() else {
+                return Outcome::None;
+            };
+            let changed = if forward {
+                self.track_hist.redo(&mut song)
+            } else {
+                self.track_hist.undo(&mut song)
+            };
+            self.track = Some(song);
+            if !changed {
+                self.message = Some(
+                    if forward {
+                        "Nothing to redo"
+                    } else {
+                        "Nothing to undo"
+                    }
+                    .to_string(),
+                );
+                return Outcome::None;
+            }
+            self.clamp_position();
+            if self.order_pattern() != before_slot {
+                self.sync_view_to_order();
+            } else if viewed_tail {
+                let end = self.pattern_total().saturating_sub(1);
+                self.retarget_pattern(end);
+            }
+            return Outcome::Edited;
+        }
         let before_slot = self.order_pattern();
         let before_len = self.module.patterns.len().max(1);
         let viewed_tail = self.view_pattern + 1 >= before_len;
@@ -1454,8 +1961,17 @@ impl App {
             self.set_message("Already the first pattern");
             return Outcome::None;
         }
-        if self.is_readonly() {
-            self.set_error("XM and IT songs are read-only. Pattern editing is not supported yet.");
+        if self.track.is_some() {
+            let appended = self.edit_track(|song| {
+                crate::track::edit::append_pattern(song);
+            });
+            if appended {
+                let created = self.pattern_total().saturating_sub(1);
+                self.retarget_pattern(created);
+                self.set_message(format!("Pattern {:02}", self.view_pattern));
+                return Outcome::Edited;
+            }
+            self.set_message("Already at 256 patterns");
             return Outcome::None;
         }
         if self.editor.append_pattern(&mut self.module) {
@@ -1619,7 +2135,7 @@ pub fn command_for(app: &App, key: Key) -> Option<Command> {
         }
     }
     if app.focus == Focus::Pattern && app.editing {
-        edit_key(app.field, key)
+        edit_key(app.field, key, app.track.as_ref().map(|song| song.format))
     } else {
         browse_key(app.focus, key)
     }
@@ -1740,7 +2256,7 @@ fn pattern_chord(key: Key) -> Option<Command> {
     }
 }
 
-fn edit_key(field: Field, key: Key) -> Option<Command> {
+fn edit_key(field: Field, key: Key, format: Option<crate::track::Format>) -> Option<Command> {
     match key {
         Key::Left => Some(Command::MoveField(-1)),
         Key::Right => Some(Command::MoveField(1)),
@@ -1762,20 +2278,80 @@ fn edit_key(field: Field, key: Key) -> Option<Command> {
         Key::CtrlBackspace => Some(Command::DeleteChannelRow),
         Key::CtrlInsert => Some(Command::InsertPatternRow),
         Key::CtrlDelete => Some(Command::DeletePatternRow),
-        Key::Char(ch) => note_or_digit(field, ch),
+        Key::Char(ch) => note_or_digit(field, ch, format),
         _ => None,
     }
 }
 
-fn note_or_digit(field: Field, ch: char) -> Option<Command> {
+fn note_or_digit(field: Field, ch: char, format: Option<crate::track::Format>) -> Option<Command> {
+    if field == Field::Effect {
+        if let Some(format) = format {
+            return track_effect_number(format, ch).map(Command::EnterDigit);
+        }
+    }
     match field {
         Field::Note => semitone_from_key(ch).map(Command::EnterNote),
         Field::SampleHigh | Field::SampleLow => ch
             .to_digit(10)
             .map(|digit| Command::EnterDigit(u8::try_from(digit).unwrap_or(0))),
+        Field::VolumeHigh | Field::VolumeLow => ch
+            .to_digit(16)
+            .map(|digit| Command::EnterDigit(u8::try_from(digit).unwrap_or(0))),
         Field::Effect | Field::ParamHigh | Field::ParamLow => ch
             .to_digit(16)
             .map(|digit| Command::EnterDigit(u8::try_from(digit).unwrap_or(0))),
+    }
+}
+
+fn track_field(field: Field) -> crate::track::edit::TrackField {
+    use crate::track::edit::TrackField;
+    match field {
+        Field::Note => TrackField::Note,
+        Field::SampleHigh => TrackField::InstrumentHigh,
+        Field::SampleLow => TrackField::InstrumentLow,
+        Field::VolumeHigh => TrackField::VolumeHigh,
+        Field::VolumeLow => TrackField::VolumeLow,
+        Field::Effect => TrackField::Effect,
+        Field::ParamHigh => TrackField::ParamHigh,
+        Field::ParamLow => TrackField::ParamLow,
+    }
+}
+
+fn track_field_after(field: Field) -> Field {
+    match field {
+        Field::Note => Field::SampleHigh,
+        Field::SampleHigh => Field::SampleLow,
+        Field::SampleLow => Field::VolumeHigh,
+        Field::VolumeHigh => Field::VolumeLow,
+        Field::VolumeLow => Field::Effect,
+        Field::Effect => Field::ParamHigh,
+        Field::ParamHigh => Field::ParamLow,
+        Field::ParamLow => Field::Note,
+    }
+}
+
+fn track_effect_number(format: crate::track::Format, ch: char) -> Option<u8> {
+    let upper = ch.to_ascii_uppercase();
+    let byte = upper as u8;
+    match format {
+        crate::track::Format::Xm => {
+            if upper.is_ascii_digit() {
+                Some(byte - b'0')
+            } else if byte.is_ascii_uppercase() {
+                Some(10 + (byte - b'A'))
+            } else {
+                None
+            }
+        }
+        crate::track::Format::It => {
+            if byte.is_ascii_uppercase() {
+                Some(1 + (byte - b'A'))
+            } else if upper == '0' {
+                Some(0)
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -2456,12 +3032,50 @@ mod tests {
     }
 
     #[test]
-    fn pattern_view_keys_do_not_append_on_xm_or_it() {
+    fn an_xm_edit_is_still_there_after_save_and_reopen() {
+        let mut app = App::new(Module::new(Tag::Mk));
+        app.install_track(readonly_song(), std::path::PathBuf::from("song.xm"));
+        app.apply(Command::ToggleEdit);
+        assert!(app.editing);
+        let outcome = app.apply(command_for(&app, Key::Char('z')).unwrap());
+        assert!(matches!(outcome, Outcome::Edited));
+        let note = app.track.as_ref().unwrap().patterns[0].rows[0][0].note;
+        assert_ne!(note, 0);
+        let path = std::env::temp_dir().join(format!("omatrack-xm-edit-{}.xm", std::process::id()));
+        app.path = path.clone();
+        let message = app.save().unwrap();
+        assert!(message.contains("Saved"), "{message}");
+        assert!(!app.is_dirty());
+        let bytes = std::fs::read(&path).unwrap();
+        let reopened = match crate::open_bytes(&bytes).unwrap() {
+            crate::Opened::Track(song) => song,
+            crate::Opened::Mod(_) => panic!("saved xm opened as mod"),
+        };
+        assert_eq!(reopened.format, crate::track::Format::Xm);
+        assert_eq!(reopened.patterns[0].rows[0][0].note, note);
+        let _ = std::fs::remove_file(&path);
+
+        let it_path =
+            std::env::temp_dir().join(format!("omatrack-xm-as-it-{}.it", std::process::id()));
+        let message = app.save_as(it_path.clone()).unwrap();
+        assert!(message.contains("Saved"), "{message}");
+        let it_bytes = std::fs::read(&it_path).unwrap();
+        assert!(it_bytes.starts_with(b"IMPM"));
+        let _ = std::fs::remove_file(it_path);
+    }
+
+    #[test]
+    fn pattern_view_appends_a_blank_pattern_on_xm_or_it() {
         for format in [crate::track::Format::Xm, crate::track::Format::It] {
             let mut song = readonly_song();
             song.format = format;
             let mut app = App::new(Module::new(Tag::Mk));
-            app.install_track(song, std::path::PathBuf::from("song.xm"));
+            let path = if format == crate::track::Format::Xm {
+                "song.xm"
+            } else {
+                "song.it"
+            };
+            app.install_track(song, std::path::PathBuf::from(path));
             app.focus = Focus::Pattern;
             let before = app.order_pattern();
             assert_eq!(app.view_pattern, 0);
@@ -2469,25 +3083,20 @@ mod tests {
             assert!(matches!(outcome, Outcome::None));
             assert_eq!(app.view_pattern, 1);
             assert_eq!(app.order_pattern(), before);
-            assert_eq!(app.editor.undo_len(), 0);
-            assert!(app.message.is_none());
+            assert!(!app.is_dirty());
 
             app.apply(command_for(&app, Key::CtrlRight).unwrap());
             assert_eq!(app.view_pattern, 2);
             let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
-            assert!(matches!(outcome, Outcome::None));
-            assert_eq!(app.view_pattern, 2);
+            assert!(matches!(outcome, Outcome::Edited));
+            assert_eq!(app.view_pattern, 3);
             assert_eq!(app.order_pattern(), before);
-            assert_eq!(app.editor.undo_len(), 0);
-            let message = app.message.as_deref().unwrap_or("");
-            assert!(
-                message.contains("read-only"),
-                "{format:?} message was {message}"
-            );
-            app.apply(command_for(&app, Key::CtrlLeft).unwrap());
-            assert_eq!(app.view_pattern, 1);
-            assert_eq!(app.order_pattern(), before);
-            assert_eq!(app.editor.undo_len(), 0);
+            assert!(app.is_dirty());
+            let patterns = app.track.as_ref().unwrap().patterns.len();
+            assert_eq!(patterns, 4);
+            app.apply(Command::Undo);
+            assert_eq!(app.track.as_ref().unwrap().patterns.len(), 3);
+            assert!(!app.is_dirty());
         }
     }
 
@@ -2696,6 +3305,8 @@ mod tests {
             instrument_mode: true,
             old_effects: false,
             compatible_gxx: false,
+            compat: 0,
+            load_notes: crate::track::LoadNotes::default(),
         }
     }
 

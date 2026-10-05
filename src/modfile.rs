@@ -130,6 +130,12 @@ impl Module {
     /// index above that has no slot in the file. Those patterns stay on
     /// `self`. The returned index is the first pattern that was not written,
     /// when the in-memory list is longer than the file can hold.
+    /// Bytes [`Self::save_stored`] would write, plus the first pattern index
+    /// that does not fit, when the in-memory list is longer than the file.
+    pub fn to_stored_bytes(&self) -> Result<(Vec<u8>, Option<usize>), Error> {
+        stored_bytes(self)
+    }
+
     pub fn save_stored(&self, path: impl AsRef<Path>) -> Result<Option<usize>, Error> {
         let path = path.as_ref();
         let (bytes, omitted) = stored_bytes(self)?;

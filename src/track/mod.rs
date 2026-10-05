@@ -1,13 +1,18 @@
-//! FastTracker 2 `.xm` and Impulse Tracker `.it` loading and playback.
+//! FastTracker 2 `.xm` and Impulse Tracker `.it` loading, saving, and playback.
 //!
 //! `.mod` files stay on [`crate::Module`]. [`open_bytes`] picks the parser
 //! from the file header, not from the extension.
 
+mod convert;
+pub(crate) mod edit;
 mod engine;
 mod it;
 mod pitch;
 mod song;
 mod xm;
+
+pub use convert::{save_module, save_song, save_song_as, SaveFormat, Saved};
+pub use edit::TrackHistory;
 
 use std::path::Path;
 
