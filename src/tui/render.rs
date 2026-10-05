@@ -309,7 +309,8 @@ fn draw_too_small(frame: &mut Frame, area: Rect, theme: Theme) {
 }
 
 fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
-    let block = pane("Song", false, theme);
+    let focused = app.focus == Focus::Order;
+    let block = pane("Song", focused, theme);
     let inner_w = usize::from(area.width.saturating_sub(2));
     let inner_h = usize::from(area.height.saturating_sub(2));
     let mut lines = Vec::new();
@@ -1530,6 +1531,91 @@ mod tests {
     }
 
     #[test]
+    fn song_pane_border_follows_focus() {
+        let omarchy = Theme::from_palette(
+            &crate::omarchy::palette_from_colors_toml(
+                r##"
+background = "#1a1b26"
+foreground = "#a9b1d6"
+accent = "#7aa2f7"
+muted = "#414868"
+bright_foreground = "#c0caf5"
+red = "#f7768e"
+green = "#9ece6a"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+cyan = "#449dab"
+magenta = "#ad8ee6"
+lighter_background = "#24283b"
+"##,
+            )
+            .expect("palette"),
+        );
+        for theme in [
+            Theme::protracker(),
+            Theme::phosphor(),
+            Theme::terminal(),
+            omarchy,
+        ] {
+            assert_ne!(
+                theme.border, theme.border_focus,
+                "{} border and focus border are the same color",
+                theme.id
+            );
+            let mut app = demo();
+            app.set_theme(theme, theme.id);
+            assert_eq!(app.focus, Focus::Pattern);
+
+            let pattern = render(&mut app, 100, 40);
+            let pattern_screen = text_of(&pattern);
+            assert!(!pattern_screen.contains("* Song"), "{pattern_screen}");
+            assert_has(&pattern_screen, "* Pattern");
+            assert_song_border(&pattern, theme.border, theme.id);
+            assert_eq!(pane_border_fg(&pattern, "Pattern"), theme.border_focus);
+            assert_eq!(pane_border_fg(&pattern, "Samples"), theme.border);
+            assert_eq!(pane_border_fg(&pattern, "Spectrum"), theme.border);
+
+            app.apply(command_for(&app, Key::Tab).unwrap());
+            assert_eq!(app.focus, Focus::Samples);
+            let samples = render(&mut app, 100, 40);
+            let samples_screen = text_of(&samples);
+            assert!(!samples_screen.contains("* Song"), "{samples_screen}");
+            assert_has(&samples_screen, "* Samples");
+            assert!(!samples_screen.contains("* Pattern"), "{samples_screen}");
+            assert_song_border(&samples, theme.border, theme.id);
+            assert_eq!(pane_border_fg(&samples, "Pattern"), theme.border);
+            assert_eq!(pane_border_fg(&samples, "Samples"), theme.border_focus);
+            assert_eq!(pane_border_fg(&samples, "Spectrum"), theme.border);
+
+            app.apply(command_for(&app, Key::Tab).unwrap());
+            assert_eq!(app.focus, Focus::Order);
+            let song = render(&mut app, 100, 40);
+            let song_screen = text_of(&song);
+            assert_has(&song_screen, "* Song");
+            assert!(!song_screen.contains("* Pattern"), "{song_screen}");
+            assert!(!song_screen.contains("* Samples"), "{song_screen}");
+            assert_song_border(&song, theme.border_focus, theme.id);
+            assert_ne!(
+                pane_border_fg(&song, "Song"),
+                pane_border_fg(&pattern, "Song"),
+                "{} song border did not change when focused",
+                theme.id
+            );
+            assert_eq!(pane_border_fg(&song, "Pattern"), theme.border);
+            assert_eq!(pane_border_fg(&song, "Samples"), theme.border);
+            // Spectrum and scope are not focus stops. They stay on the plain border.
+            assert_eq!(pane_border_fg(&song, "Spectrum"), theme.border);
+
+            app.viz_mode = VizMode::Scope;
+            let scope = render(&mut app, 100, 40);
+            assert_has(&text_of(&scope), "* Song");
+            assert_song_border(&scope, theme.border_focus, theme.id);
+            assert_eq!(pane_border_fg(&scope, "Scope"), theme.border);
+            assert!(!text_of(&scope).contains("* Scope"), "{}", text_of(&scope));
+        }
+    }
+
+    #[test]
     fn a_tiny_terminal_asks_for_more_room() {
         let mut app = demo();
         let screen = text_of(&render(&mut app, 40, 10));
@@ -2270,6 +2356,61 @@ mod tests {
                 row_text(buf, y)
             );
         }
+    }
+
+    fn pane_corner(buf: &ratatui::buffer::Buffer, title: &str) -> (u16, u16) {
+        for y in 0..buf.area.height {
+            let mut word = String::new();
+            let mut word_x = 0u16;
+            for x in 0..=buf.area.width {
+                let symbol = if x == buf.area.width {
+                    " "
+                } else {
+                    buf[(x, y)].symbol()
+                };
+                let alphanumeric = symbol.len() == 1
+                    && symbol
+                        .chars()
+                        .next()
+                        .is_some_and(|ch| ch.is_ascii_alphanumeric());
+                if alphanumeric {
+                    if word.is_empty() {
+                        word_x = x;
+                    }
+                    word.push_str(symbol);
+                    continue;
+                }
+                if word == title {
+                    if let Some(corner) = (0..word_x).rev().find(|&cx| buf[(cx, y)].symbol() == "┌")
+                    {
+                        return (corner, y);
+                    }
+                }
+                word.clear();
+            }
+        }
+        panic!("no {title} pane in:\n{}", text_of(buf));
+    }
+
+    fn pane_border_fg(buf: &ratatui::buffer::Buffer, title: &str) -> Color {
+        let (x, y) = pane_corner(buf, title);
+        let fg = buf[(x, y)].fg;
+        assert_eq!(buf[(x, y)].symbol(), "┌", "{title}");
+        assert_eq!(buf[(x, y + 1)].symbol(), "│", "{title}");
+        assert_eq!(
+            buf[(x, y + 1)].fg,
+            fg,
+            "{title} side border differs from the corner"
+        );
+        fg
+    }
+
+    fn assert_song_border(buf: &ratatui::buffer::Buffer, expected: Color, label: &str) {
+        assert_eq!(pane_border_fg(buf, "Song"), expected, "{label}");
+        let (_, y) = pane_corner(buf, "Song");
+        let right = buf.area.width - 1;
+        assert_eq!(buf[(right, y)].symbol(), "┐", "{label}");
+        assert_eq!(buf[(right, y)].fg, expected, "{label} right corner");
     }
 
     fn find_box_row(buf: &ratatui::buffer::Buffer, title: &str) -> u16 {
