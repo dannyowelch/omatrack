@@ -21,17 +21,20 @@ is a terminal tracker for 31-sample, 4-channel ProTracker modules
 .BR FLT4 ,
 and
 .BR 4CHN ),
-and a player for FastTracker 2
+FastTracker 2
 .B .xm
+(up to 32 channels),
 and Impulse Tracker
 .B .it
-files.
+(up to 64 channels).
+It loads, plays, edits, and saves all three.
 Format is detected from the header
 .RB ( "Extended Module: "
 or
 .BR IMPM ),
 not only from the extension.
-XM and IT songs are shown, played, edited, and saved, including more than four channels.
+When a song has more channels than fit, the pattern view scrolls,
+and a volume meter under each visible column scrolls with it.
 .B Ctrl-S
 writes the format of the open file.
 Save As uses the extension
@@ -195,12 +198,14 @@ It does not quit.
 .TP
 .B Tab / Shift-Tab
 Next or previous pane.
-In edit mode, Tab changes channel.
+In edit mode, Tab and Shift-Tab change channel.
 .TP
 .B 1 2 3 4
-Mute a channel.
+Mute one of the first four channels.
 In edit mode use
 .BR Alt-1 " through " Alt-4 .
+A song with more channels shows the channel count on the transport
+instead of a per-channel on/off list.
 .TP
 .B F1 / F2
 Octave, 1 through 3.
@@ -216,9 +221,17 @@ The pattern pane title is
 .B Pattern 15
 and, when that is not the pattern stored in the current order slot,
 .BR "Pattern 15 (slot 03 = 07)" .
-In edit mode the title is
+In edit mode a
+.B .mod
+titles the pane
 .B EDIT 15
 with the same slot note.
+.B .xm
+and
+.B .it
+keep the
+.B Pattern
+title while editing.
 .B Ctrl-Right
 past the last pattern appends one blank pattern and shows it.
 That pattern is not inserted into the order.
@@ -236,6 +249,21 @@ Up and Down in the song pane change the pattern number in the current
 order slot, and every existing pattern stays selectable, including one
 the order list does not reference.
 Changing a slot does not delete pattern data.
+Insert and Delete insert and remove an order entry.
+.B +
+and
+.B \-
+change the song length
+.RB ( =
+is the same as
+.BR + ):
+1\(en128 on a
+.BR .mod ,
+1\(en256 on XM and IT.
+.B n
+on the order pane, and
+.B Ctrl-N
+from anywhere, appends an empty pattern and points the current entry at it.
 Undo and redo restore the slot or an appended pattern.
 Playback follows the order list, not the pattern on screen.
 .B Ctrl-Right
@@ -326,6 +354,26 @@ Older Omarchy used
 .IR ~/.config/omarchy/current/theme .
 The canonical palette is
 .IR colors.toml .
+The song header shows the theme name.
+An Omarchy theme uses the first line of
+.I theme.name
+beside the theme directory, so a machine set to gruvbox, hackerman,
+or matte-black shows that name.
+When
+.I theme.name
+is missing the label is
+.BR omarchy .
+Built-in palettes show
+.BR protracker ,
+.BR phosphor ,
+or
+.BR terminal .
+.B \-\-theme
+does not take an Omarchy theme's name.
+.B auto
+and
+.B omarchy
+follow whichever theme is currently published.
 If that file is absent, omatrack reads
 .IR alacritty.toml ,
 .IR kitty.conf ,
