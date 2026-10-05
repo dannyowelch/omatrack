@@ -12,3 +12,5 @@ The license is not the same for every file:
 Artist, title, license URL, source page, and sha256 for every file are in `ATTRIBUTION.txt`.
 
 `tests/sample_fixtures.rs` parses each `.mod` and checks that writing it back matches the file bytes. Every `.mod` in this set, including the OpenMPT loader test, is an ordinary 31-sample `M.K.` module, so a byte-identical round trip is required. The `.xm` and `.it` fixtures are parsed and rendered by `tests/track_format.rs`. Omatrack does not write those formats back.
+
+`long_rows_synthetic.it` (114 rows, 16 channels) and `long_rows_synthetic.xm` (256 rows, 8 channels) are generated empty modules, not third-party songs. They exist so the pattern gutter can be checked once row numbers pass 99.

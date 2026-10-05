@@ -357,6 +357,83 @@ fn draw_song(frame: &mut Frame, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(Paragraph::new(lines).block(block), area);
 }
 
+/// Digit columns of a pattern row number.
+///
+/// Two digits through index 99. One more digit each time the last index
+/// crosses a power of ten, so a 114-row pattern and a 256-row XM pattern use
+/// three, and an IT pattern of 1024 rows uses four. Every row of that pattern,
+/// the channel header, and the meter strip use this same width.
+fn row_gutter_digits(row_count: usize) -> usize {
+    let last = row_count.saturating_sub(1).max(10);
+    (last.ilog10() as usize) + 1
+}
+
+/// Columns taken by the row number, including the blank before channel 1.
+fn row_gutter_width(row_count: usize) -> usize {
+    row_gutter_digits(row_count) + 1
+}
+
+/// Row label padded so row 0 lines up with the last row.
+///
+/// Formatting each index on its own (the way [`fmt_num`] does) is what shifts
+/// row 100 one column to the right of row 99.
+fn row_gutter_text(row: usize, row_count: usize) -> String {
+    let digits = row_gutter_digits(row_count);
+    let text = format!("{row:0digits$} ");
+    debug_assert_eq!(text.chars().count(), row_gutter_width(row_count));
+    text
+}
+
+fn row_gutter_blank(row_count: usize) -> String {
+    " ".repeat(row_gutter_width(row_count))
+}
+
+/// Columns of one track channel, including the gap before the next channel.
+const TRACK_CELL: usize = 11;
+
+/// Content column where visible channel `index` begins.
+///
+/// Column 0 is the first digit of the row number, inside the pane border.
+/// Channel 0 starts just after the gutter. Each later channel starts
+/// [`TRACK_CELL`] columns later (10 cell columns plus the gap).
+fn track_cell_x(row_count: usize, index: usize) -> usize {
+    row_gutter_width(row_count) + index * TRACK_CELL
+}
+
+/// How many track columns fit in `inner_w`.
+///
+/// The quotient is `(inner_w - gutter) / TRACK_CELL`, the same count a fixed
+/// 3-column gutter produced. Patterns of 100 rows or fewer therefore keep the
+/// column count they had. The gutter comes from [`track_cell_x`], so a wider
+/// row number cannot leave horizontal scrolling one column ahead of the cells.
+fn track_channels_fit(inner_w: usize, row_count: usize) -> usize {
+    let fit = inner_w.saturating_sub(track_cell_x(row_count, 0)) / TRACK_CELL;
+    debug_assert!(
+        fit == 0 || track_channel_at_x(track_cell_x(row_count, 0), row_count, fit) == Some(0)
+    );
+    fit
+}
+
+/// Visible channel whose cell covers content column `x`.
+///
+/// `None` on the row-number gutter and on the blank between columns. The
+/// index is relative to the first drawn channel; add the horizontal scroll
+/// to get the song channel. The cursor cell starts at [`track_cell_x`].
+fn track_channel_at_x(x: usize, row_count: usize, visible: usize) -> Option<usize> {
+    let origin = track_cell_x(row_count, 0);
+    if x < origin || visible == 0 {
+        return None;
+    }
+    let offset = x - origin;
+    let index = offset / TRACK_CELL;
+    let column = offset % TRACK_CELL;
+    if index < visible && column < TRACK_CELL - 1 {
+        Some(index)
+    } else {
+        None
+    }
+}
+
 fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
     if app.track.is_some() {
         draw_track_pattern(frame, area, app, theme);
@@ -377,7 +454,7 @@ fn draw_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme) {
         ));
     }
     if inner_h > 1 {
-        lines.push(column_header_line(theme));
+        lines.push(column_header_line(theme, app.row_count()));
     }
     if let Some(pattern) = app.module.patterns.get(app.view_pattern) {
         let start = app.row_offset;
@@ -404,8 +481,8 @@ fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme
     let inner_h = usize::from(area.height.saturating_sub(2));
     let (row_window, meter_rows) = pattern_chrome(inner_h);
     let channels = app.channel_count();
-    let visible = inner_w.saturating_sub(3) / TRACK_CELL;
-    let visible = visible.max(1).min(channels);
+    let row_count = app.row_count();
+    let visible = track_channels_fit(inner_w, row_count).max(1).min(channels);
     app.reveal_channel(visible);
     let start_ch = app.channel_scroll;
     let end_ch = (start_ch + visible).min(channels);
@@ -417,11 +494,10 @@ fn draw_track_pattern(frame: &mut Frame, area: Rect, app: &mut App, theme: Theme
         ));
     }
     if inner_h > 1 {
-        lines.push(track_header_line(theme, start_ch, end_ch));
+        lines.push(track_header_line(theme, start_ch, end_ch, row_count));
     }
-    let song_rows = app.row_count();
     let row_start = app.row_offset;
-    let row_end = (row_start + row_window).min(song_rows);
+    let row_end = (row_start + row_window).min(row_count);
     if let Some(song) = &app.track {
         for row in row_start..row_end {
             lines.push(track_row(song, row, start_ch, end_ch, app, theme, inner_w));
@@ -447,7 +523,7 @@ fn seal_pattern_lines(lines: &mut Vec<Line<'static>>, inner_h: usize, meter: Lin
 }
 
 fn mod_meter_line(app: &App, theme: Theme) -> Line<'static> {
-    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    let mut spans = vec![Span::styled(row_gutter_blank(app.row_count()), theme.dim())];
     for channel in 0..CHANNELS {
         if channel > 0 {
             spans.push(Span::styled(" | ".to_string(), theme.dim()));
@@ -458,7 +534,7 @@ fn mod_meter_line(app: &App, theme: Theme) -> Line<'static> {
 }
 
 fn track_meter_line(app: &App, theme: Theme, start: usize, end: usize) -> Line<'static> {
-    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+    let mut spans = vec![Span::styled(row_gutter_blank(app.row_count()), theme.dim())];
     for channel in start..end {
         if channel > start {
             spans.push(Span::styled(" ".to_string(), theme.dim()));
@@ -490,10 +566,8 @@ fn channel_meter_spans(
     spans
 }
 
-const TRACK_CELL: usize = 11;
-
-fn track_header_line(theme: Theme, start: usize, end: usize) -> Line<'static> {
-    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+fn track_header_line(theme: Theme, start: usize, end: usize, row_count: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled(row_gutter_blank(row_count), theme.dim())];
     for channel in start..end {
         if channel > start {
             spans.push(Span::styled(" ".to_string(), theme.dim()));
@@ -526,20 +600,21 @@ fn track_row(
     } else {
         theme.background
     };
-    let mut spans = vec![Span::styled(
-        format!("{row:02} "),
-        paint(theme.accent, line_bg, false),
-    )];
+    let row_count = app.row_count();
+    let gutter = row_gutter_text(row, row_count);
+    debug_assert_eq!(gutter.chars().count(), track_cell_x(row_count, 0));
+    let mut spans = vec![Span::styled(gutter, paint(theme.accent, line_bg, false))];
     let pattern = song.patterns.get(app.view_pattern);
-    let mut width = 3usize;
-    for channel in start_ch..end_ch {
-        if channel > start_ch {
+    let mut width = track_cell_x(row_count, 0);
+    for (visible_index, channel) in (start_ch..end_ch).enumerate() {
+        if visible_index > 0 {
             spans.push(Span::styled(
                 " ".to_string(),
                 paint(theme.dim, line_bg, false),
             ));
             width += 1;
         }
+        debug_assert_eq!(width, track_cell_x(row_count, visible_index));
         let cell = pattern
             .and_then(|pattern| pattern.rows.get(row))
             .and_then(|row| row.get(channel))
@@ -760,8 +835,8 @@ fn fmt_num(value: usize) -> String {
     }
 }
 
-fn column_header_line(theme: Theme) -> Line<'static> {
-    let mut spans = vec![Span::styled("   ".to_string(), theme.dim())];
+fn column_header_line(theme: Theme, row_count: usize) -> Line<'static> {
+    let mut spans = vec![Span::styled(row_gutter_blank(row_count), theme.dim())];
     for channel in 0..CHANNELS {
         if channel > 0 {
             spans.push(Span::styled(" | ".to_string(), theme.dim()));
@@ -790,11 +865,10 @@ fn pattern_row(
     } else {
         theme.background
     };
-    let mut spans = vec![Span::styled(
-        format!("{row:02} "),
-        paint(theme.accent, line_bg, false),
-    )];
-    let mut width = 3usize;
+    let row_count = app.row_count();
+    let gutter = row_gutter_text(row, row_count);
+    let mut spans = vec![Span::styled(gutter, paint(theme.accent, line_bg, false))];
+    let mut width = row_gutter_width(row_count);
     for channel in 0..CHANNELS {
         if channel > 0 {
             spans.push(Span::styled(" | ", paint(theme.dim, line_bg, false)));
@@ -1662,6 +1736,295 @@ mod tests {
         assert_meter_under_channel(&cramped, "Ch1 ", '█', Color::Rgb(255, 214, 102));
     }
 
+    #[test]
+    fn a_64_row_pattern_keeps_the_two_digit_gutter() {
+        let mut module = demo();
+        let rendered = render(&mut module, 100, 40);
+        let header = content_line(&rendered, header_y(&rendered));
+        let row = content_line(&rendered, find_pattern_line(&rendered, "00"));
+        assert!(header.starts_with("   Ch 1"), "{header}");
+        assert!(row.starts_with("00 C-1"), "{row}");
+        assert_eq!(header.find("Ch 1"), row.find("C-1"));
+        let cell_x = find_on_row(&rendered, find_pattern_line(&rendered, "00"), "C-1").unwrap();
+        assert_eq!(usize::from(cell_x) - 1, track_cell_x(64, 0));
+        assert_eq!(
+            buf_bg(&rendered, cell_x, find_pattern_line(&rendered, "00")),
+            Color::Yellow
+        );
+        assert_ne!(
+            buf_bg(&rendered, cell_x - 1, find_pattern_line(&rendered, "00")),
+            Color::Yellow
+        );
+
+        let mut app = demo();
+        app.install_track(wide_song(8), std::path::PathBuf::from("wide.xm"));
+        let buf = render(&mut app, 100, 40);
+        let header = content_line(&buf, header_y(&buf));
+        let y = find_pattern_line(&buf, "00");
+        let row = content_line(&buf, y);
+        assert!(header.starts_with("   Ch1 "), "{header}");
+        assert!(row.starts_with("00 ---"), "{row}");
+        assert!(!row.starts_with("000"), "{row}");
+        assert_eq!(header.find("Ch1"), row.find("---"));
+        let cell_x = find_on_row(&buf, y, "---").unwrap();
+        assert_eq!(usize::from(cell_x) - 1, track_cell_x(64, 0));
+        assert_eq!(track_channel_at_x(usize::from(cell_x) - 1, 64, 8), Some(0));
+        assert_eq!(track_channel_at_x(usize::from(cell_x) - 2, 64, 8), None);
+        assert_eq!(buf[(cell_x, y)].bg, Color::Yellow);
+        for offset in 0..10 {
+            assert_eq!(buf[(cell_x + offset, y)].bg, Color::Yellow);
+        }
+        assert_ne!(buf[(cell_x + 10, y)].bg, Color::Yellow);
+    }
+
+    #[test]
+    fn rows_past_99_share_one_gutter_with_the_header_cursor_and_meters() {
+        assert_eq!(row_gutter_digits(64), 2);
+        assert_eq!(row_gutter_digits(100), 2);
+        assert_eq!(row_gutter_digits(101), 3);
+        assert_eq!(row_gutter_digits(114), 3);
+        assert_eq!(row_gutter_digits(256), 3);
+        assert_eq!(row_gutter_digits(1024), 4);
+        assert_eq!(row_gutter_text(99, 100), "99 ");
+        assert_eq!(row_gutter_text(99, 114), "099 ");
+        assert_eq!(row_gutter_text(100, 114), "100 ");
+        assert_eq!(row_gutter_text(255, 256), "255 ");
+        assert_eq!(row_gutter_text(1023, 1024), "1023 ");
+
+        let mut hundred = demo();
+        hundred.install_track(
+            song_rows(100, 8, crate::track::Format::Xm),
+            std::path::PathBuf::from("hundred.xm"),
+        );
+        hundred.row = 99;
+        let buf = render(&mut hundred, 100, 40);
+        let header = content_line(&buf, header_y(&buf));
+        let row = content_line(&buf, find_pattern_line(&buf, "99"));
+        assert!(header.starts_with("   Ch1 "), "{header}");
+        assert!(row.starts_with("99 "), "{row}");
+        assert!(!row.starts_with("099"), "{row}");
+
+        let mut boundary = demo();
+        boundary.install_track(
+            song_rows(101, 8, crate::track::Format::Xm),
+            std::path::PathBuf::from("boundary.xm"),
+        );
+        boundary.row = 100;
+        let buf = render(&mut boundary, 160, 50);
+        assert!(content_line(&buf, header_y(&buf)).starts_with("    Ch1 "));
+        let y99 = find_pattern_line(&buf, "099");
+        let y100 = find_pattern_line(&buf, "100");
+        assert_eq!(
+            find_on_row(&buf, y99, "---"),
+            find_on_row(&buf, y100, "---")
+        );
+
+        for &(width, height) in &[(100u16, 40u16), (160, 50)] {
+            let mut app = demo();
+            let mut song = song_rows(114, 16, crate::track::Format::It);
+            song.patterns[0].rows[99][0] = crate::track::Cell::tone(60);
+            let mut loud = crate::track::Cell::tone(62);
+            loud.instrument = 1;
+            loud.effect = 0x0A;
+            loud.param = 0x0C;
+            song.patterns[0].rows[100][0] = loud;
+            app.install_track(song, std::path::PathBuf::from("long.it"));
+            app.row = 100;
+            peg_channels(&mut app, &[8_192]);
+            let buf = render(&mut app, width, height);
+            let screen = text_of(&buf);
+            assert_has(&screen, "Row 100");
+            assert_has(&screen, "IT 16ch");
+            let header_y = header_y(&buf);
+            let header = content_line(&buf, header_y);
+            assert!(
+                header.starts_with("    Ch1 "),
+                "{width}x{height} header {header}"
+            );
+            let y99 = find_pattern_line(&buf, "099");
+            let y100 = find_pattern_line(&buf, "100");
+            let row99 = content_line(&buf, y99);
+            let row100 = content_line(&buf, y100);
+            assert!(row99.starts_with("099 C-5"), "{width}x{height}\n{row99}");
+            assert!(
+                row100.starts_with("100 D-501--J0C"),
+                "{width}x{height}\n{row100}"
+            );
+            let x99 = find_on_row(&buf, y99, "C-5").unwrap();
+            let x100 = find_on_row(&buf, y100, "D-5").unwrap();
+            let x_header = find_on_row(&buf, header_y, "Ch1 ").unwrap();
+            assert_eq!(x99, x100, "{width}x{height}\n{row99}\n{row100}");
+            assert_eq!(x99, x_header, "{header}");
+            assert_eq!(usize::from(x100) - 1, track_cell_x(114, 0));
+            assert_eq!(track_channel_at_x(usize::from(x100) - 1, 114, 8), Some(0));
+            assert_eq!(track_channel_at_x(usize::from(x100) - 2, 114, 8), None);
+            assert_eq!(buf[(x100, y100)].bg, Color::Yellow, "cursor on row 100");
+            assert_ne!(buf[(x100 - 1, y100)].bg, Color::Yellow, "gutter stays put");
+            for offset in 0..10 {
+                assert_eq!(
+                    buf[(x100 + offset, y100)].bg,
+                    Color::Yellow,
+                    "cursor column {offset} at {width}x{height}"
+                );
+            }
+            assert_ne!(buf[(x100 + 10, y100)].bg, Color::Yellow);
+            assert_ne!(buf[(x99, y99)].bg, Color::Yellow);
+            assert_meter_under_channel(&buf, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+        }
+
+        let mut xm = demo();
+        xm.install_track(
+            song_rows(256, 8, crate::track::Format::Xm),
+            std::path::PathBuf::from("long.xm"),
+        );
+        xm.row = 255;
+        let buf = render(&mut xm, 160, 50);
+        let y255 = find_pattern_line(&buf, "255");
+        let y254 = find_pattern_line(&buf, "254");
+        assert_eq!(
+            find_on_row(&buf, y255, "---"),
+            find_on_row(&buf, y254, "---"),
+            "XM 256-row gutter drifted\n{}",
+            text_of(&buf)
+        );
+        assert!(content_line(&buf, header_y(&buf)).starts_with("    Ch1 "));
+        assert!(content_line(&buf, y255).starts_with("255 "));
+
+        let mut it = demo();
+        it.install_track(
+            song_rows(1024, 4, crate::track::Format::It),
+            std::path::PathBuf::from("max.it"),
+        );
+        it.row = 1023;
+        let buf = render(&mut it, 160, 50);
+        let y_last = find_pattern_line(&buf, "1023");
+        let y_prev = find_pattern_line(&buf, "1022");
+        assert_eq!(
+            find_on_row(&buf, y_last, "---"),
+            find_on_row(&buf, y_prev, "---")
+        );
+        assert!(content_line(&buf, header_y(&buf)).starts_with("     Ch1 "));
+        assert_eq!(
+            usize::from(find_on_row(&buf, y_last, "---").unwrap()) - 1,
+            track_cell_x(1024, 0)
+        );
+    }
+
+    #[test]
+    fn column_fit_and_hit_testing_use_the_same_gutter() {
+        assert_eq!(track_cell_x(64, 0), 3);
+        assert_eq!(track_cell_x(100, 0), 3);
+        assert_eq!(track_cell_x(101, 0), 4);
+        assert_eq!(track_cell_x(114, 1), 4 + TRACK_CELL);
+        assert_eq!(track_channels_fit(80, 64), 7);
+        assert_eq!(track_channels_fit(80, 100), 7);
+        assert_eq!(track_channels_fit(80, 101), 6);
+        assert_eq!(track_channels_fit(80, 256), 6);
+        assert_eq!(track_channel_at_x(2, 64, 7), None);
+        assert_eq!(track_channel_at_x(3, 64, 7), Some(0));
+        assert_eq!(track_channel_at_x(3, 114, 6), None);
+        assert_eq!(track_channel_at_x(4, 114, 6), Some(0));
+        assert_eq!(track_channel_at_x(13, 114, 6), Some(0));
+        assert_eq!(track_channel_at_x(14, 114, 6), None);
+        assert_eq!(track_channel_at_x(15, 114, 6), Some(1));
+
+        let mut app = demo();
+        app.install_track(
+            song_rows(64, 16, crate::track::Format::Xm),
+            std::path::PathBuf::from("wide.xm"),
+        );
+        let narrow = render(&mut app, 82, 30);
+        let header = header_row(&narrow);
+        assert!(header.contains("Ch7 "), "{header}");
+        assert!(!header.contains("Ch8"), "{header}");
+
+        app.channel = 15;
+        let scrolled = render(&mut app, 82, 30);
+        let header = header_row(&scrolled);
+        assert!(header.contains("Ch10"), "{header}");
+        assert!(header.contains("Ch16"), "{header}");
+        assert!(!header.contains("Ch9"), "{header}");
+        assert_eq!(app.channel_scroll, 9);
+
+        app.install_track(
+            song_rows(114, 16, crate::track::Format::It),
+            std::path::PathBuf::from("long.it"),
+        );
+        let wide_gutter = render(&mut app, 82, 30);
+        let header = header_row(&wide_gutter);
+        assert!(header.contains("Ch6 "), "{header}");
+        assert!(!header.contains("Ch7"), "{header}");
+
+        app.channel = 15;
+        let mut hot = vec![0u16; 16];
+        hot[15] = 8_192;
+        peg_channels(&mut app, &hot);
+        let scrolled = render(&mut app, 82, 30);
+        let header = header_row(&scrolled);
+        assert!(header.contains("Ch11"), "{header}");
+        assert!(header.contains("Ch16"), "{header}");
+        assert!(!header.contains("Ch10"), "{header}");
+        assert_eq!(app.channel_scroll, 10);
+        let y = find_pattern_line(&scrolled, "000");
+        let cell_x = find_on_row(&scrolled, y, "---").unwrap();
+        assert_eq!(usize::from(cell_x) - 1, track_cell_x(114, 0));
+        assert_eq!(
+            track_channel_at_x(usize::from(cell_x) - 1, 114, 6)
+                .map(|index| index + app.channel_scroll),
+            Some(10)
+        );
+        assert_meter_under_channel(&scrolled, "Ch16", '█', Color::Rgb(255, 160, 196));
+    }
+
+    #[test]
+    fn synthetic_long_modules_keep_row_99_aligned_with_row_100() {
+        let it = load_track("tests/data/long_rows_synthetic.it");
+        assert_eq!(it.format, crate::track::Format::It);
+        assert_eq!(it.row_count(0), 114);
+        assert_eq!(it.channels, 16);
+        assert_eq!(
+            it.cell(0, 99, 0).map(|cell| cell.note),
+            Some(crate::track::Cell::tone(60).note)
+        );
+        let mut app = demo();
+        app.install_track(it, std::path::PathBuf::from("long_rows_synthetic.it"));
+        app.row = 100;
+        peg_channels(&mut app, &[8_192]);
+        for &(width, height) in &[(100u16, 40u16), (160, 50)] {
+            let buf = render(&mut app, width, height);
+            let y99 = find_pattern_line(&buf, "099");
+            let y100 = find_pattern_line(&buf, "100");
+            let x99 = find_on_row(&buf, y99, "C-5").expect("row 99 note");
+            let x100 = find_on_row(&buf, y100, "D-5").expect("row 100 note");
+            let header = find_on_row(&buf, header_y(&buf), "Ch1 ").expect("Ch1");
+            assert_eq!(x99, x100, "{width}x{height}\n{}", text_of(&buf));
+            assert_eq!(x99, header);
+            assert_eq!(usize::from(x99) - 1, track_cell_x(114, 0));
+            assert_meter_under_channel(&buf, "Ch1 ", '█', Color::Rgb(255, 214, 102));
+            assert!(
+                content_line(&buf, y100).starts_with("100 D-5"),
+                "{}",
+                content_line(&buf, y100)
+            );
+        }
+
+        let xm = load_track("tests/data/long_rows_synthetic.xm");
+        assert_eq!(xm.format, crate::track::Format::Xm);
+        assert_eq!(xm.row_count(0), 256);
+        assert_eq!(xm.channels, 8);
+        app.install_track(xm, std::path::PathBuf::from("long_rows_synthetic.xm"));
+        app.row = 255;
+        let buf = render(&mut app, 160, 50);
+        let y255 = find_pattern_line(&buf, "255");
+        let y254 = find_pattern_line(&buf, "254");
+        assert_eq!(
+            find_on_row(&buf, y255, "---"),
+            find_on_row(&buf, y254, "---")
+        );
+        assert!(content_line(&buf, header_y(&buf)).starts_with("    Ch1 "));
+        assert!(content_line(&buf, y255).starts_with("255 "));
+    }
+
     fn peg_channels(app: &mut App, peaks: &[u16]) {
         let mut four = [0u16; 4];
         for (slot, peak) in four.iter_mut().zip(peaks) {
@@ -1688,14 +2051,20 @@ mod tests {
     }
 
     fn wide_song(channels: usize) -> crate::Song {
+        let mut song = song_rows(64, channels, crate::track::Format::Xm);
+        song.title = "Wide".to_string();
+        song
+    }
+
+    fn song_rows(rows: usize, channels: usize, format: crate::track::Format) -> crate::Song {
         crate::Song {
-            title: "Wide".to_string(),
+            title: format!("Rows {rows}"),
             tracker: String::new(),
-            format: crate::track::Format::Xm,
+            format,
             channels,
             orders: vec![0],
             restart: 0,
-            patterns: vec![crate::track::Pattern::empty(64, channels)],
+            patterns: vec![crate::track::Pattern::empty(rows, channels)],
             instruments: Vec::new(),
             samples: Vec::new(),
             linear: true,
@@ -1718,6 +2087,36 @@ mod tests {
             crate::Opened::Track(song) => song,
             crate::Opened::Mod(_) => panic!("{rel} parsed as a module"),
         }
+    }
+
+    fn content_line(buf: &ratatui::buffer::Buffer, y: u16) -> String {
+        let mut out = String::new();
+        let end = buf.area.width.saturating_sub(1);
+        for x in 1..end {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out
+    }
+
+    fn find_pattern_line(buf: &ratatui::buffer::Buffer, label: &str) -> u16 {
+        let header = header_y(buf);
+        let prefix = format!("{label} ");
+        for y in (header + 1)..buf.area.height {
+            if buf[(0, y)].symbol() != "│" {
+                continue;
+            }
+            if content_line(buf, y).starts_with(&prefix) {
+                return y;
+            }
+        }
+        panic!(
+            "no pattern row {label:?} under the channel header\n{}",
+            text_of(buf)
+        );
+    }
+
+    fn buf_bg(buf: &ratatui::buffer::Buffer, x: u16, y: u16) -> Color {
+        buf[(x, y)].bg
     }
 
     fn row_text(buf: &ratatui::buffer::Buffer, y: u16) -> String {
