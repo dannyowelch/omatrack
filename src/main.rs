@@ -440,7 +440,9 @@ Keys:
     PgUp/PgDn            page
     Home/End             first or last row, or sample
     [ ]                  previous / next order position
-    , .                  previous / next pattern
+    , .                  previous / next pattern (view only)
+    Ctrl-Left/Right      pattern number in the current order slot
+                         (Ctrl-Right past the last pattern makes a blank one)
 
 Sample list (R still renames; w reverses, so the keys do not clash):
     i / o                import a WAV / export this sample
@@ -527,6 +529,8 @@ mod tests {
         assert!(help.contains("spectrum, scope, or off"));
         assert!(help.contains("Ctrl-R"));
         assert!(help.contains("order 0, row 0"));
+        assert!(help.contains("Ctrl-Left/Right"));
+        assert!(help.contains("current order slot"));
     }
 
     #[test]
