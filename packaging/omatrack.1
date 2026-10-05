@@ -181,13 +181,15 @@ Octave, 1 through 3.
 Edit step, 0 through 16.
 .TP
 .B F5
-Cycle the visualization: the spectrum and channel meters, then the
-full-screen scope, then hidden, then the spectrum again.
+Cycle the visualization: the spectrum beside the sample list, then the
+scope in that same pane, then hidden, then the spectrum again.
+Channel meters stay under the pattern columns in every mode and scroll
+with those columns.
 The tracker opens on the spectrum unless
 .B default_view
 says otherwise.
-The spectrum needs about 28 rows; a shorter terminal keeps the pattern
-without an error, and F5 still reaches the scope.
+.B off
+lets the sample list use the full width.
 .PP
 In edit mode the lower piano row is
 .B Z S X D C V G B H N J M

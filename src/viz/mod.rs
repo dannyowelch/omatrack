@@ -45,12 +45,12 @@ pub const HOP: usize = 512;
 /// the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum VizMode {
-    /// The pattern editor, with no analyzer.
+    /// Pattern and samples, with no spectrum or scope. Meters stay under the columns.
     Off,
-    /// Spectrum and four channel meters under the pattern.
+    /// Spectrum on the right half of the sample row.
     #[default]
     Panel,
-    /// Full-screen vectorscope.
+    /// Scope on the right half of the sample row.
     Scope,
 }
 

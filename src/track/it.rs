@@ -846,16 +846,19 @@ fn truncated(context: &'static str, expected: usize, actual: usize) -> Error {
 }
 
 fn latin1(bytes: &[u8]) -> String {
+    // Interior NULs show up in IT sample names (a short name padded on the
+    // left). They must not reach the terminal: a NUL is not a column, so the
+    // rest of the row slides left and eats the pane border.
     let end = bytes
         .iter()
-        .rposition(|b| *b != 0 && *b != b' ')
-        .map(|i| i + 1)
+        .rposition(|byte| *byte > b' ' && *byte != 0x7F)
+        .map(|index| index + 1)
         .unwrap_or(0);
     bytes[..end]
         .iter()
+        .filter(|byte| **byte >= 0x20 && **byte != 0x7F)
         .map(|byte| char::from(*byte))
         .collect::<String>()
-        .trim_matches('\0')
         .trim()
         .to_string()
 }

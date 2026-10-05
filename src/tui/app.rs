@@ -285,7 +285,7 @@ pub enum Command {
     GuardSave,
     /// Drop edits and run the pending file action.
     GuardDiscard,
-    /// Off, then the spectrum panel, then the full-screen scope.
+    /// Off, then the spectrum beside the samples, then the scope in that pane.
     CycleViz,
 }
 
@@ -731,7 +731,7 @@ impl App {
                 self.viz_mode = self.viz_mode.cycle();
                 self.set_message(match self.viz_mode {
                     VizMode::Off => "Visualization off",
-                    VizMode::Panel => "Spectrum and meters (F5 for scope)",
+                    VizMode::Panel => "Spectrum (F5 for scope)",
                     VizMode::Scope => "Scope (F5 to hide)",
                 });
                 Outcome::None

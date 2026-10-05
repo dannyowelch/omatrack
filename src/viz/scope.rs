@@ -1,4 +1,4 @@
-//! Braille canvas for the full-screen scope.
+//! Braille canvas for the scope pane.
 //!
 //! Each cell is one Unicode braille pattern (U+2800), two dots wide and four
 //! tall. Drawing is pure: stereo samples and four channel levels in, bits out.
