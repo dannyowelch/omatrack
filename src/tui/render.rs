@@ -21,8 +21,6 @@ use super::viz;
 
 const MIN_WIDTH: u16 = 76;
 const MIN_HEIGHT: u16 = 20;
-const HELP: &str = "Ctrl-F file  Enter edit  F5 viz  ? help  Ctrl-S  space play  Ctrl-R q quit";
-
 const HELP_LINES: &[&str] = &[
     "Omatrack keys                                          ? or Esc closes",
     "Enter edit/browse   Space play/stop   Ctrl-S save   Ctrl-Z undo  Ctrl-Y redo",
@@ -30,7 +28,7 @@ const HELP_LINES: &[&str] = &[
     "Ctrl-Q quits anywhere. q quits from browse. Esc: block, then edit, then quit.",
     "Ctrl-F file: n new, o open, s save, a save as. New, open, and quit ask",
     "when the song is unsaved. An untitled save asks for a path. Ctrl-C copies.",
-    "Arrows move. Tab changes pane; in edit, Tab changes channel.",
+    "Arrows move. Tab changes pane. Ctrl-Left/Right edits the slot's pattern.",
     "F1 F2 octave 1-3    F3 F4 step 0-16    F5 cycles spectrum, scope, off",
     "Column meters scroll with the pattern. default_view is spectrum, scope, or off.",
     "Alt-1..4 mute a channel while editing. 1-4 mute in browse.",
@@ -38,13 +36,13 @@ const HELP_LINES: &[&str] = &[
     "Edit mode. Lower row is the octave, upper row is one octave higher.",
     "  Z S X D C V G B H N J M    C C# D D# E F F# G G# A A# B",
     "  Q 2 W 3 E R 5 T 6 Y 7 U    same notes, one octave higher",
-    "Delete clears the cell or one digit. Backspace clears one step up.",
+    "Delete clears a cell or digit. Backspace steps up. Tab changes channel.",
     "Insert inserts a channel row. Ctrl-Backspace deletes it. Ctrl-Insert /",
     "Ctrl-Delete do that on every channel. Digits: sample decimal, effect hex.",
     "",
     "Block: Ctrl-B select, Ctrl-A all, Ctrl-C copy, Ctrl-X cut, Ctrl-V paste.",
     "Alt-Up/Down semitone, Alt-Left/Right octave. Alt-K channel, Alt-P pattern.",
-    "Order pane: Up/Down pattern, Ins/Del entry, +/- length, N new pattern.",
+    "Order: Up/Down pattern, Ins/Del, +/- length, N new. Ctrl-Right adds one.",
     "Ctrl-T title. Samples: R renames. XM/IT read-only. i import WAV, Ctrl-G render.",
     "v volume  f finetune  l loop  / toggle  t trim  n normalize  w reverse",
     "(R still renames)  a/z fade  c clear  y copy  p preview  u undo",
@@ -101,7 +99,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         regions.status,
     );
     frame.render_widget(
-        Paragraph::new(clip(HELP.to_string(), regions.help.width)).style(theme.dim()),
+        Paragraph::new(hint_line(app, usize::from(regions.help.width))).style(theme.dim()),
         regions.help,
     );
     match &app.overlay {
@@ -1067,6 +1065,87 @@ fn transport_text(app: &App) -> String {
     )
 }
 
+/// Shortcut hints for the focused pane. Each list fits a 76-column row.
+fn status_hints(focus: Focus, editing: bool) -> &'static [&'static str] {
+    match (focus, editing) {
+        (Focus::Pattern, true) => &[
+            "Ctrl-Left/Right pat",
+            "Z-M notes",
+            "Del clear",
+            "Ctrl-Z",
+            "Space",
+            "Ctrl-R",
+            "Esc",
+            "?",
+        ],
+        (Focus::Pattern, false) => &[
+            "Ctrl-Left/Right pat",
+            "[ ] order",
+            "Space play",
+            "Ctrl-R",
+            "Enter",
+            "Tab focus",
+            "F5",
+            "?",
+        ],
+        (Focus::Samples, _) => &[
+            "R rename",
+            "i import",
+            "o export",
+            "v volume",
+            "p preview",
+            "Space",
+            "Tab",
+            "?",
+        ],
+        (Focus::Order, _) => &[
+            "Up/Down pattern",
+            "Ins/Del entry",
+            "+/- length",
+            "N new",
+            "Space",
+            "Ctrl-R",
+            "Tab",
+            "?",
+        ],
+    }
+}
+
+/// One status-bar hint row. Whole hints are dropped when `width` runs out,
+/// so a narrow terminal never slices a binding in half or wraps the row.
+fn hint_line(app: &App, width: usize) -> String {
+    fit_hints(status_hints(app.focus, app.editing), width)
+}
+
+fn fit_hints(hints: &[&str], width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut chosen: Vec<&str> = Vec::new();
+    let mut used = 0usize;
+    for hint in hints {
+        if hint.is_empty() {
+            continue;
+        }
+        let len = hint.chars().count();
+        let need = if chosen.is_empty() { len } else { len + 2 };
+        if used + need > width {
+            break;
+        }
+        chosen.push(*hint);
+        used += need;
+    }
+    if chosen.is_empty() {
+        let first = hints
+            .iter()
+            .find(|hint| !hint.is_empty())
+            .copied()
+            .unwrap_or("");
+        return clip(first.to_string(), u16::try_from(width).unwrap_or(u16::MAX));
+    }
+    chosen.join("  ")
+}
+
 fn status_text(app: &App) -> String {
     if let Some(message) = &app.message {
         if !message.is_empty() {
@@ -1362,7 +1441,7 @@ mod tests {
     use super::*;
     use crate::edit::Field;
     use crate::module::{Cell, Module, Sample, Tag};
-    use crate::tui::app::{command_for, App, Command, Key, Overlay};
+    use crate::tui::app::{command_for, App, Command, Focus, Key, Overlay};
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
     use ratatui::Terminal;
@@ -1456,7 +1535,7 @@ mod tests {
         assert_has(&screen, "kickdrum");
         assert_has(&screen, "snare");
         assert_has(&screen, "set volume");
-        assert_has(&screen, "q quit");
+        assert_has(&screen, "Ctrl-Left/Right pat");
         assert_has(&screen, "Stop");
         assert_has(&screen, "Spd 06");
         assert_has(&screen, "Tmp 125");
@@ -1672,11 +1751,9 @@ lighter_background = "#24283b"
         assert_has(&screen, "Ctrl-R rewinds");
         assert_has(&screen, "stopped only moves");
         assert_has(&screen, "r types a note");
-        assert!(
-            HELP.chars().count() <= 76,
-            "footer is {} columns",
-            HELP.chars().count()
-        );
+        assert_has(&screen, "Ctrl-Left/Right edits the slot's pattern");
+        assert_has(&screen, "Ctrl-Right adds one");
+        assert_has(&screen, "Tab changes channel");
         assert_has(&screen, "Ctrl-Z undo");
         assert_has(&screen, "Z S X D C V G B H N J M");
         assert_has(&screen, "unsaved");
@@ -1692,6 +1769,90 @@ lighter_background = "#24283b"
         assert_has(&screen, "Demo Tune *");
         assert_has(&screen, "VIEW*");
         assert_has(&screen, "Ctrl-R");
+    }
+
+    #[test]
+    fn status_hints_follow_focus_and_truncate() {
+        let mut app = demo();
+        let pattern = render(&mut app, 80, 24);
+        let hint = row_text(&pattern, 23);
+        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+        assert!(hint.contains("[ ] order"), "{hint}");
+        let status = row_text(&pattern, 22);
+        assert!(
+            status.contains("C-1") || status.contains("period"),
+            "{status}"
+        );
+
+        app.focus = Focus::Samples;
+        let samples = render(&mut app, 80, 24);
+        let hint = row_text(&samples, 23);
+        assert!(hint.contains("R rename"), "{hint}");
+        assert!(!hint.contains("Ctrl-Left"), "{hint}");
+
+        app.focus = Focus::Order;
+        let song = render(&mut app, 80, 24);
+        let hint = row_text(&song, 23);
+        assert!(hint.contains("Up/Down pattern"), "{hint}");
+        assert!(hint.contains("N new"), "{hint}");
+        assert!(!hint.contains("Ctrl-Left"), "{hint}");
+
+        app.focus = Focus::Pattern;
+        app.editing = true;
+        let editing = render(&mut app, 80, 24);
+        let hint = row_text(&editing, 23);
+        assert!(hint.contains("Z-M notes"), "{hint}");
+        assert!(!hint.contains("[ ] order"), "{hint}");
+
+        app.editing = false;
+        app.set_message("Saved demo.mod");
+        let with_message = render(&mut app, 80, 24);
+        let status = row_text(&with_message, 22);
+        let hint = row_text(&with_message, 23);
+        assert!(status.contains("Saved demo.mod"), "{status}");
+        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+        assert!(!status.contains("Ctrl-Left"), "{status}");
+
+        let long = "status message that is definitely wider than a narrow tracker row and must not wrap into the hint line or the pattern";
+        app.set_message(long);
+        let narrow = render(&mut app, 76, 20);
+        let screen = text_of(&narrow);
+        assert!(!screen.contains("too small"), "{screen}");
+        let status = row_text(&narrow, 18);
+        let hint = row_text(&narrow, 19);
+        assert_eq!(status.chars().count(), 76, "{status}");
+        assert_eq!(hint.chars().count(), 76, "{hint}");
+        assert!(status.starts_with("status message"), "{status}");
+        assert!(!status.contains("Ctrl-Left"), "{status}");
+        assert!(hint.contains("Ctrl-Left/Right pat"), "{hint}");
+
+        assert_eq!(
+            fit_hints(status_hints(Focus::Pattern, false), 28),
+            "Ctrl-Left/Right pat"
+        );
+        assert_eq!(
+            fit_hints(status_hints(Focus::Pattern, false), 30),
+            "Ctrl-Left/Right pat  [ ] order"
+        );
+        assert_eq!(
+            fit_hints(status_hints(Focus::Pattern, false), 10),
+            "Ctrl-Left/"
+        );
+        assert_eq!(fit_hints(status_hints(Focus::Pattern, false), 0), "");
+        for (focus, editing) in [
+            (Focus::Pattern, false),
+            (Focus::Pattern, true),
+            (Focus::Samples, false),
+            (Focus::Order, false),
+        ] {
+            let full = fit_hints(status_hints(focus, editing), 76);
+            assert!(
+                full.chars().count() <= 76,
+                "{focus:?} editing={editing} is {} columns: {full}",
+                full.chars().count()
+            );
+            assert_eq!(full, status_hints(focus, editing).join("  "));
+        }
     }
 
     #[test]

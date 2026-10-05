@@ -84,6 +84,10 @@ pub enum Key {
     AltLeft,
     /// Alt-Right.
     AltRight,
+    /// Ctrl-Left.
+    CtrlLeft,
+    /// Ctrl-Right.
+    CtrlRight,
 }
 
 /// One change to the view or the document.
@@ -185,6 +189,12 @@ pub enum Command {
     CloseOverlay,
     /// Change the pattern number at the current order position.
     OrderPattern(i32),
+    /// Change the pattern number stored in the current order slot.
+    ///
+    /// A positive step that is already on the last pattern appends one blank
+    /// pattern and points the slot at it. The pattern view follows the slot.
+    /// This is the pattern-pane form of [`Command::OrderPattern`].
+    SlotPattern(i32),
     /// Insert an order entry at the cursor.
     InsertOrder,
     /// Delete the current order entry.
@@ -1190,24 +1200,8 @@ impl App {
                     .transpose(&mut self.module, self.view_pattern, range, semitones);
                 self.edited(before)
             }
-            Command::Undo => {
-                if self.editor.undo(&mut self.module) {
-                    self.clamp_position();
-                    Outcome::Edited
-                } else {
-                    self.message = Some("Nothing to undo".to_string());
-                    Outcome::None
-                }
-            }
-            Command::Redo => {
-                if self.editor.redo(&mut self.module) {
-                    self.clamp_position();
-                    Outcome::Edited
-                } else {
-                    self.message = Some("Nothing to redo".to_string());
-                    Outcome::None
-                }
-            }
+            Command::Undo => self.restore_edit(false),
+            Command::Redo => self.restore_edit(true),
             Command::OrderPattern(delta) => {
                 let pos = self.order_pos;
                 if self.editor.bump_order_pattern(&mut self.module, pos, delta) {
@@ -1218,6 +1212,7 @@ impl App {
                     Outcome::None
                 }
             }
+            Command::SlotPattern(delta) => self.step_slot_pattern(delta, before),
             Command::InsertOrder => {
                 if self.editor.insert_order(&mut self.module, self.order_pos) {
                     self.sync_view_to_order();
@@ -1381,6 +1376,57 @@ impl App {
         }
     }
 
+    /// Undo (`forward` is false) or redo. When the order slot's pattern
+    /// changed, the pattern view follows that slot again.
+    fn restore_edit(&mut self, forward: bool) -> Outcome {
+        let before_slot = self.order_pattern();
+        let before_len = self.module.patterns.len();
+        let changed = if forward {
+            self.editor.redo(&mut self.module)
+        } else {
+            self.editor.undo(&mut self.module)
+        };
+        if !changed {
+            self.message = Some(
+                if forward {
+                    "Nothing to redo"
+                } else {
+                    "Nothing to undo"
+                }
+                .to_string(),
+            );
+            return Outcome::None;
+        }
+        self.clamp_position();
+        if self.order_pattern() != before_slot || self.module.patterns.len() != before_len {
+            self.sync_view_to_order();
+        }
+        Outcome::Edited
+    }
+
+    /// Previous or next pattern number in the current order slot.
+    ///
+    /// Stepping past the last pattern appends one blank pattern, which is how
+    /// a ProTracker order entry grows the pattern list: one number at a time.
+    fn step_slot_pattern(&mut self, delta: i32, before: usize) -> Outcome {
+        let pos = self.order_pos;
+        if self.editor.bump_order_pattern(&mut self.module, pos, delta) {
+            self.sync_view_to_order();
+            return self.edited(before);
+        }
+        if delta > 0 && self.editor.new_pattern(&mut self.module, pos) {
+            self.sync_view_to_order();
+            self.set_message(format!("Pattern {:02}", self.view_pattern));
+            return Outcome::Edited;
+        }
+        if delta > 0 {
+            self.set_message("Already at 256 patterns");
+        } else {
+            self.set_message("Already the first pattern");
+        }
+        Outcome::None
+    }
+
     fn nudge_selection(&mut self) {
         if let Some(selection) = &mut self.selection {
             if selection.pattern == self.view_pattern {
@@ -1489,6 +1535,9 @@ pub fn command_for(app: &App, key: Key) -> Option<Command> {
         return Some(command);
     }
     if app.focus == Focus::Pattern {
+        if let Some(command) = pattern_slot_key(key) {
+            return Some(command);
+        }
         if let Some(command) = pattern_chord(key) {
             return Some(command);
         }
@@ -1586,6 +1635,18 @@ fn global_key(key: Key) -> Option<Command> {
         Key::Alt('2') => Some(Command::ToggleMute(1)),
         Key::Alt('3') => Some(Command::ToggleMute(2)),
         Key::Alt('4') => Some(Command::ToggleMute(3)),
+        _ => None,
+    }
+}
+
+/// Pattern-pane keys that edit the current order slot's pattern number.
+///
+/// `[` and `]` already walk the order list, in browse and in edit, so they
+/// stay put. Ctrl-Left and Ctrl-Right were free.
+fn pattern_slot_key(key: Key) -> Option<Command> {
+    match key {
+        Key::CtrlLeft => Some(Command::SlotPattern(-1)),
+        Key::CtrlRight => Some(Command::SlotPattern(1)),
         _ => None,
     }
 }
@@ -2159,6 +2220,239 @@ mod tests {
         assert_eq!(app.tempo, DEFAULT_TEMPO);
         assert_eq!(app.viz.meter(0), (0.0, 0.0));
         assert!(app.muted[1]);
+    }
+
+    #[test]
+    fn pattern_slot_keys_edit_the_current_order_entry() {
+        let mut app = app_with_patterns(2);
+        app.module.patterns[0].rows[4][1].period = 856;
+        app.module.patterns[1].rows[0][0].period = 214;
+        assert_eq!(app.order_pos, 0);
+        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.view_pattern, 0);
+        assert_eq!(
+            command_for(&app, Key::Char('[')),
+            Some(Command::MoveOrder(-1))
+        );
+        assert_eq!(
+            command_for(&app, Key::Char(']')),
+            Some(Command::MoveOrder(1))
+        );
+        assert_eq!(
+            command_for(&app, Key::CtrlLeft),
+            Some(Command::SlotPattern(-1))
+        );
+        assert_eq!(
+            command_for(&app, Key::CtrlRight),
+            Some(Command::SlotPattern(1))
+        );
+
+        assert!(matches!(app.apply(Command::SlotPattern(-1)), Outcome::None));
+        assert_eq!(app.message.as_deref(), Some("Already the first pattern"));
+        assert!(!app.is_dirty());
+        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.editor.undo_len(), 0);
+
+        assert!(matches!(
+            app.apply(command_for(&app, Key::CtrlRight).unwrap()),
+            Outcome::Edited
+        ));
+        assert_eq!(app.order_pos, 0, "the order cursor stays on this slot");
+        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.module.order[1], 1);
+        assert_eq!(app.view_pattern, 1);
+        assert_eq!(app.module.patterns.len(), 2);
+        assert!(app.is_dirty());
+        assert_eq!(app.module.patterns[0].rows[4][1].period, 856);
+        assert_eq!(app.current_cell().unwrap().period, 214);
+
+        assert!(matches!(
+            app.apply(command_for(&app, Key::CtrlRight).unwrap()),
+            Outcome::Edited
+        ));
+        assert_eq!(app.module.patterns.len(), 3);
+        assert_eq!(app.module.order[0], 2);
+        assert_eq!(app.view_pattern, 2);
+        assert_eq!(app.order_pos, 0);
+        assert_eq!(app.module.patterns[2].rows[0][0], Cell::empty());
+        assert_eq!(app.module.patterns[2].rows[63][3], Cell::empty());
+        assert_eq!(app.message.as_deref(), Some("Pattern 02"));
+
+        app.apply(Command::Undo);
+        assert_eq!(app.module.patterns.len(), 2);
+        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.view_pattern, 1);
+        app.apply(Command::Undo);
+        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.view_pattern, 0);
+        assert!(!app.is_dirty());
+
+        app.apply(Command::Redo);
+        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.view_pattern, 1);
+        assert_eq!(app.module.patterns.len(), 2);
+        app.apply(Command::Redo);
+        assert_eq!(app.module.patterns.len(), 3);
+        assert_eq!(app.module.order[0], 2);
+        assert_eq!(app.view_pattern, 2);
+
+        app.apply(Command::Undo);
+        app.apply(Command::Undo);
+        app.apply(Command::MovePattern(1));
+        assert_eq!(app.view_pattern, 1);
+        assert_eq!(app.module.order[0], 0);
+        app.apply(Command::ToggleEdit);
+        app.apply(Command::EnterNote(0));
+        assert_eq!(app.module.patterns[1].rows[0][0].sample, 1);
+        app.apply(Command::Undo);
+        assert_eq!(
+            app.view_pattern, 1,
+            "undoing a cell stays on the pattern being edited"
+        );
+        assert_eq!(app.module.patterns[1].rows[0][0].period, 214);
+        assert_eq!(app.module.order[0], 0);
+
+        app.focus = Focus::Order;
+        app.editing = false;
+        app.view_pattern = 1;
+        app.module.order[0] = 1;
+        let patterns = app.module.patterns.len();
+        app.apply(command_for(&app, Key::Up).unwrap());
+        assert_eq!(app.module.patterns.len(), patterns);
+        assert_eq!(app.message.as_deref(), Some("N makes a new pattern"));
+    }
+
+    #[test]
+    fn pattern_slot_keys_follow_pattern_focus_including_edit_mode() {
+        let mut app = app_with_patterns(2);
+        app.apply(Command::ToggleEdit);
+        assert!(app.editing);
+        assert_eq!(
+            command_for(&app, Key::CtrlRight),
+            Some(Command::SlotPattern(1))
+        );
+        assert_eq!(
+            command_for(&app, Key::Char('z')),
+            Some(Command::EnterNote(0))
+        );
+        assert_eq!(
+            command_for(&app, Key::Char('[')),
+            Some(Command::MoveOrder(-1))
+        );
+        app.apply(command_for(&app, Key::CtrlRight).unwrap());
+        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.view_pattern, 1);
+        assert!(app.editing);
+
+        app.focus = Focus::Samples;
+        assert_eq!(command_for(&app, Key::CtrlLeft), None);
+        assert_eq!(command_for(&app, Key::CtrlRight), None);
+        app.focus = Focus::Order;
+        assert_eq!(command_for(&app, Key::CtrlRight), None);
+        assert_eq!(command_for(&app, Key::Up), Some(Command::OrderPattern(1)));
+
+        app.focus = Focus::Pattern;
+        app.apply(Command::ShowHelp);
+        assert_eq!(command_for(&app, Key::CtrlRight), None);
+        app.apply(Command::CloseOverlay);
+        app.apply(Command::ShowFile);
+        assert_eq!(command_for(&app, Key::CtrlRight), None);
+    }
+
+    #[test]
+    fn pattern_slot_keys_do_not_edit_xm_or_it() {
+        for format in [crate::track::Format::Xm, crate::track::Format::It] {
+            let mut song = readonly_song();
+            song.format = format;
+            let mut app = App::new(Module::new(Tag::Mk));
+            app.install_track(song, std::path::PathBuf::from("song.xm"));
+            app.focus = Focus::Pattern;
+            let before = app.order_pattern();
+            let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
+            assert!(matches!(outcome, Outcome::None));
+            assert_eq!(app.order_pattern(), before);
+            assert_eq!(app.editor.undo_len(), 0);
+            let message = app.message.as_deref().unwrap_or("");
+            assert!(
+                message.contains("read-only"),
+                "{format:?} message was {message}"
+            );
+            app.apply(command_for(&app, Key::CtrlLeft).unwrap());
+            assert_eq!(app.order_pattern(), before);
+            assert_eq!(app.editor.undo_len(), 0);
+        }
+    }
+
+    #[test]
+    fn playback_reads_the_pattern_the_slot_now_names() {
+        let mut app = app_with_patterns(2);
+        app.module.samples[0].volume = 64;
+        app.module.samples[0]
+            .set_data(vec![96, 96, 0xA0, 0xA0])
+            .unwrap();
+        app.module.samples[0].loop_start = 0;
+        app.module.samples[0].loop_length = 2;
+        app.module.patterns[0].rows[0][0] = Cell {
+            sample: 1,
+            period: 856,
+            effect: 0,
+            param: 0,
+        };
+        app.module.patterns[1].rows[0][0] = Cell {
+            sample: 1,
+            period: 214,
+            effect: 0,
+            param: 0,
+        };
+
+        app.playing = true;
+        let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
+        assert!(matches!(outcome, Outcome::Edited));
+        assert!(app.playing, "a song edit does not stop playback");
+        assert_eq!(app.order_pos, 0);
+        assert_eq!(app.module.order[0], 1);
+
+        let mut playback = crate::player::Playback::new(crate::player::PlayerConfig {
+            sample_rate: 8_000,
+            ..crate::player::PlayerConfig::default()
+        });
+        playback.start(&app.module, app.order_pos, 0);
+        assert_eq!(playback.order(), 0);
+        assert_eq!(playback.pattern_index(&app.module), 1);
+        let mut buffer = vec![0i16; 400];
+        playback.render(&app.module, &mut buffer);
+        assert_eq!(playback.channel(0).unwrap().period, 214);
+        assert_eq!(playback.order(), 0);
+        assert_eq!(playback.row(), 0);
+    }
+
+    fn readonly_song() -> crate::Song {
+        crate::Song {
+            title: "Read only".to_string(),
+            tracker: String::new(),
+            format: crate::track::Format::Xm,
+            channels: 4,
+            orders: vec![0, 2],
+            restart: 0,
+            patterns: vec![
+                crate::track::Pattern::empty(64, 4),
+                crate::track::Pattern::empty(64, 4),
+                crate::track::Pattern::empty(64, 4),
+            ],
+            instruments: Vec::new(),
+            samples: Vec::new(),
+            linear: true,
+            initial_speed: 6,
+            initial_tempo: 125,
+            initial_global_volume: 64,
+            global_volume_max: 64,
+            initial_pan: vec![128; 4],
+            initial_channel_volume: vec![64; 4],
+            initial_mute: vec![false; 4],
+            instrument_mode: true,
+            old_effects: false,
+            compatible_gxx: false,
+        }
     }
 
     fn loud_snapshot(gen: u64) -> VizSnapshot {

@@ -180,6 +180,29 @@ Octave, 1 through 3.
 .B F3 / F4
 Edit step, 0 through 16.
 .TP
+.B Ctrl-Left / Ctrl-Right
+While the pattern pane is focused, in browse or edit, change the pattern
+number stored in the current order position.
+The pattern view and the song list follow that slot.
+.B Ctrl-Right
+past the last existing pattern appends one blank pattern and points the
+slot at it.
+.B Ctrl-Left
+on pattern 0 does nothing.
+.B [
+and
+.B ]
+still move between order positions, and
+.B ,
+and
+.B .
+still only change which pattern is shown.
+Undo and redo restore the slot, the pattern list, and the view.
+Playback keeps its order position and reads the edited song.
+XM and IT files are not edited.
+The bottom row lists shortcuts for the focused pane and drops the ones
+that do not fit.
+.TP
 .B F5
 Cycle the visualization: the spectrum beside the sample list, then the
 scope in that same pane, then hidden, then the spectrum again.

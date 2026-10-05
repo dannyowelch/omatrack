@@ -384,6 +384,8 @@ fn map_key(key: KeyEvent) -> Option<AppKey> {
             KeyCode::Backspace => Some(AppKey::CtrlBackspace),
             KeyCode::Delete => Some(AppKey::CtrlDelete),
             KeyCode::Insert => Some(AppKey::CtrlInsert),
+            KeyCode::Left => Some(AppKey::CtrlLeft),
+            KeyCode::Right => Some(AppKey::CtrlRight),
             _ => None,
         };
     }
@@ -479,5 +481,9 @@ mod tests {
         assert_eq!(map_key(alt_up), Some(AppKey::AltUp));
         let insert = KeyEvent::new(KeyCode::Insert, KeyModifiers::CONTROL);
         assert_eq!(map_key(insert), Some(AppKey::CtrlInsert));
+        let ctrl_left = KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_left), Some(AppKey::CtrlLeft));
+        let ctrl_right = KeyEvent::new(KeyCode::Right, KeyModifiers::CONTROL);
+        assert_eq!(map_key(ctrl_right), Some(AppKey::CtrlRight));
     }
 }

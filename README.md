@@ -90,7 +90,8 @@ F5               cycle visualization: spectrum, scope, off
 PgUp/PgDn        page
 Home/End         first or last row, or sample
 [ ]              previous / next order position
-, .              previous / next pattern
+, .              previous / next pattern (view only)
+Ctrl-Left/Right  pattern number in the current order slot
 ```
 
 `Ctrl-R` rewinds to order 0, row 0. If the song is playing, it keeps playing from the start: channel voices, pattern loops, and the meters are cleared, so a note or a loop cannot keep running from the old position. If the song is stopped, the cursor moves to the start and playback stays stopped. `r` is not that key. In edit mode `r` is the upper-octave F#, and on the sample list `r` renames the instrument. Text entry, the file menu, and the other prompts ignore `Ctrl-R`.
@@ -145,7 +146,9 @@ Truecolor (`ESC[38;2;…m`) is used when `COLORTERM` is `truecolor` or `24bit`, 
 
 `SIGUSR1` reloads the palette (`kill -USR1` the process). So does a change to the theme file, the theme directory, or `theme.name`, which is what an atomic `omarchy-theme-set` swap looks like. The check is a `stat` each frame.
 
-`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo. `Ctrl-R` sends that playhead back to order 0, row 0 without stopping it. The same key, while stopped, only moves the cursor.
+`[ ]` follows the order list and changes the pattern you see. `,` `.` walks patterns directly, including ones the current order position does not point at. `Ctrl-Left` and `Ctrl-Right`, while the pattern pane is focused, edit the pattern number stored in the current order slot. The pattern on screen follows that slot, and the song list shows the new number. This is the same edit as Up and Down in the song pane: the number moves to the previous or next pattern that already exists. `[` and `]` are not those keys. They still move to another order position. `Ctrl-Right` on the last pattern appends one blank pattern and points the slot at it, which is how a ProTracker order entry grows the pattern list, one number at a time. `Ctrl-Left` on pattern 0 does nothing. Undo and redo put the slot, the pattern list, and the view back. Playback keeps its order position and reads the edited song, so the next row comes from the pattern that slot now names. An XM or IT file stays read-only: the keys say so and leave the song alone. The same keys work in edit mode. The bottom row of the screen lists the shortcuts for whichever pane Tab has focused, and drops the ones that do not fit.
+
+While the song is playing, and you are not editing, the view follows the playhead: the current row is green, and the transport bar shows order, row, speed, and tempo. `Ctrl-R` sends that playhead back to order 0, row 0 without stopping it. The same key, while stopped, only moves the cursor.
 
 Notes use ProTracker octave numbers (`C-1` is period 856, not `C-4`). Sample numbers in the pattern are decimal `01`–`31`. The loop column is `start+length` in bytes, and `-` means the sample does not loop.
 
@@ -169,7 +172,7 @@ Delete on the note clears the whole cell. Delete on a digit clears that digit. B
 
 Ctrl-B starts a block at the cursor; moving the cursor grows it, and Ctrl-B again clears it. Ctrl-A selects the pattern. Ctrl-C copies, Ctrl-X cuts, Ctrl-V pastes at the cursor. Alt-Up and Alt-Down transpose by a semitone. Alt-Left and Alt-Right transpose by an octave. Notes that are not in the ProTracker period table are left alone, and the ends of C-1..B-3 clamp. Alt-K clears the channel. Alt-P clears the pattern. With no block marked, copy, cut, and transpose use the current cell. Ctrl-C copies; it does not quit.
 
-The order pane (Tab until the song header is focused) edits the order list. Up and Down change the pattern number at the cursor. Insert and Delete insert and remove an entry. `+` and `-` change the song length. `N` appends an empty pattern and points the current entry at it. Past 64 patterns an `M.K.` tag becomes `M!K!`.
+The order pane (Tab until the song header is focused) edits the order list. Up and Down change the pattern number at the cursor. Insert and Delete insert and remove an entry. `+` and `-` change the song length. `N` appends an empty pattern and points the current entry at it. From the pattern pane, Ctrl-Left and Ctrl-Right change that same number, and Ctrl-Right past the last pattern does what `N` does. Past 64 patterns an `M.K.` tag becomes `M!K!`.
 
 Ctrl-T edits the title. On the sample list, `R` renames the current sample. Enter stores the text, Esc cancels. Names are Latin-1, 20 bytes for the title and 22 for a sample.
 
