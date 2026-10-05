@@ -13,11 +13,10 @@
 reopen_last = true
 
 # Visualization at startup. F5 cycles spectrum, scope, off.
-#   spectrum   bars and the four channel meters
-#   scope      full-screen vectorscope
-#   off        pattern only, until F5
-# A terminal shorter than about 28 rows keeps the pattern and hides the
-# spectrum panel. That is not an error; F5 still reaches the scope.
+#   spectrum   bars on the right half of the sample row
+#   scope      vectorscope in that same pane
+#   off        sample list uses the full width
+# Channel meters sit under the pattern columns in every mode.
 default_view = "spectrum"
 
 # theme: auto | omarchy | protracker | phosphor | terminal
