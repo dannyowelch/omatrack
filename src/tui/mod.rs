@@ -325,14 +325,9 @@ fn persist(app: &mut App, state_path: &Path) -> bool {
         return false;
     }
     match app.save() {
-        Ok(()) => {
+        Ok(message) => {
             let _ = crate::state::write(state_path, &app.path);
-            let name = app
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("module");
-            app.set_message(format!("Saved {name}"));
+            app.set_message(message);
             true
         }
         Err(message) => {

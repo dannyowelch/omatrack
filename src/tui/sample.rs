@@ -653,8 +653,8 @@ impl App {
                 }
                 Outcome::None
             }
-            PathKind::SaveModule => match self.module.save(&path) {
-                Ok(()) => {
+            PathKind::SaveModule => match self.module.save_stored(&path) {
+                Ok(omitted) => {
                     let name = path
                         .file_name()
                         .and_then(|name| name.to_str())
@@ -663,7 +663,9 @@ impl App {
                     self.path = path;
                     self.editor.mark_saved();
                     self.overlay = super::app::Overlay::None;
-                    self.set_message(format!("Saved {name}"));
+                    let patterns = self.module.patterns.len();
+                    self.note_unstored_patterns(omitted);
+                    self.set_message(super::app::save_status(&name, omitted, patterns));
                     Outcome::Saved
                 }
                 Err(err) => {

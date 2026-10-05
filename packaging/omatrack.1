@@ -181,27 +181,45 @@ Octave, 1 through 3.
 Edit step, 0 through 16.
 .TP
 .B Ctrl-Left / Ctrl-Right
-While the pattern pane is focused, in browse or edit, change the pattern
-number stored in the current order position.
-The pattern view and the song list follow that slot.
+While the pattern pane is focused, in browse or edit, change which pattern
+is shown.
+They do not change the order list.
+The pattern pane title is
+.B Pattern 15
+and, when that is not the pattern stored in the current order slot,
+.BR "Pattern 15 (slot 03 = 07)" .
+In edit mode the title is
+.B EDIT 15
+with the same slot note.
 .B Ctrl-Right
-past the last existing pattern appends one blank pattern and points the
-slot at it.
+past the last pattern appends one blank pattern and shows it.
+That pattern is not inserted into the order.
 .B Ctrl-Left
 on pattern 0 does nothing.
-.B [
-and
-.B ]
-still move between order positions, and
 .B ,
 and
 .B .
-still only change which pattern is shown.
-Undo and redo restore the slot, the pattern list, and the view.
-Playback keeps its order position and reads the edited song.
-XM and IT files are not edited.
+change the viewed pattern the same way and stop at the ends.
+.B [
+and
+.B ]
+still move between order positions.
+Up and Down in the song pane change the pattern number in the current
+order slot, and every existing pattern stays selectable, including one
+the order list does not reference.
+Changing a slot does not delete pattern data.
+Undo and redo restore the slot or an appended pattern.
+Playback follows the order list, not the pattern on screen.
+XM and IT files are not edited:
+.B Ctrl-Right
+past the last pattern says so and does not add one.
 The bottom row lists shortcuts for the focused pane and drops the ones
 that do not fit.
+A
+.B .mod
+stores patterns through the highest order entry.
+A pattern above that stays in memory, and the status line says that
+reopening the file will not have it, until an order slot references it.
 .TP
 .B F5
 Cycle the visualization: the spectrum beside the sample list, then the

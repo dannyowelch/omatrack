@@ -189,12 +189,11 @@ pub enum Command {
     CloseOverlay,
     /// Change the pattern number at the current order position.
     OrderPattern(i32),
-    /// Change the pattern number stored in the current order slot.
+    /// Show another pattern in the pattern pane. The order list is not changed.
     ///
     /// A positive step that is already on the last pattern appends one blank
-    /// pattern and points the slot at it. The pattern view follows the slot.
-    /// This is the pattern-pane form of [`Command::OrderPattern`].
-    SlotPattern(i32),
+    /// pattern and shows it. That pattern is not inserted into the order.
+    BrowsePattern(i32),
     /// Insert an order entry at the cursor.
     InsertOrder,
     /// Delete the current order entry.
@@ -610,18 +609,37 @@ impl App {
     /// Write the module to the path it was opened from.
     ///
     /// XM and IT are not written. The original file is left untouched.
-    pub fn save(&mut self) -> Result<(), String> {
+    /// The returned string is the status line. When the pattern list runs past
+    /// the highest order entry, those patterns stay in memory and the message
+    /// says they were not written: a `.mod` stores `max(order) + 1` patterns.
+    pub fn save(&mut self) -> Result<String, String> {
         if self.track.is_some() {
             return Err(crate::track::SAVE_UNSUPPORTED.to_string());
         }
         if self.path.as_os_str().is_empty() {
             return Err("there is no file to save".to_string());
         }
-        self.module
-            .save(&self.path)
+        let omitted = self
+            .module
+            .save_stored(&self.path)
             .map_err(|err| err.to_string())?;
         self.editor.mark_saved();
-        Ok(())
+        self.note_unstored_patterns(omitted);
+        let name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("module");
+        Ok(save_status(name, omitted, self.module.patterns.len()))
+    }
+
+    /// Remember that a `.mod` could not hold patterns above the highest order entry.
+    pub(crate) fn note_unstored_patterns(&mut self, omitted_from: Option<usize>) {
+        if let Some(detail) = unstored_detail(omitted_from, self.module.patterns.len()) {
+            self.notice = Some(detail);
+        } else if self.notice.as_deref().is_some_and(is_unstored_notice) {
+            self.notice = None;
+        }
     }
 
     /// Pattern channels in the open song.
@@ -765,6 +783,7 @@ impl App {
                 Outcome::None
             }
             Command::TextConfirm => self.confirm_text(),
+            Command::BrowsePattern(delta) => self.browse_pattern(delta),
             other if is_motion(other) => {
                 self.apply_motion(other);
                 Outcome::None
@@ -1044,12 +1063,7 @@ impl App {
                 self.retarget_from_order();
             }
             Command::MovePattern(delta) => {
-                let len = if let Some(song) = &self.track {
-                    song.patterns.len().max(1)
-                } else {
-                    self.module.patterns.len().max(1)
-                };
-                let next = step(self.view_pattern, delta, len);
+                let next = step(self.view_pattern, delta, self.pattern_total());
                 self.retarget_pattern(next);
             }
             Command::NextFocus => self.focus = cycle(self.focus, true),
@@ -1212,7 +1226,6 @@ impl App {
                     Outcome::None
                 }
             }
-            Command::SlotPattern(delta) => self.step_slot_pattern(delta, before),
             Command::InsertOrder => {
                 if self.editor.insert_order(&mut self.module, self.order_pos) {
                     self.sync_view_to_order();
@@ -1376,11 +1389,15 @@ impl App {
         }
     }
 
-    /// Undo (`forward` is false) or redo. When the order slot's pattern
-    /// changed, the pattern view follows that slot again.
+    /// Undo (`forward` is false) or redo.
+    ///
+    /// When the order slot's pattern changed, the view follows that slot.
+    /// Appending a pattern does not change the slot, so undo and redo stay on
+    /// the tail of the pattern list instead of jumping back to the slot.
     fn restore_edit(&mut self, forward: bool) -> Outcome {
         let before_slot = self.order_pattern();
-        let before_len = self.module.patterns.len();
+        let before_len = self.module.patterns.len().max(1);
+        let viewed_tail = self.view_pattern + 1 >= before_len;
         let changed = if forward {
             self.editor.redo(&mut self.module)
         } else {
@@ -1398,32 +1415,56 @@ impl App {
             return Outcome::None;
         }
         self.clamp_position();
-        if self.order_pattern() != before_slot || self.module.patterns.len() != before_len {
+        if self.order_pattern() != before_slot {
             self.sync_view_to_order();
+        } else if viewed_tail {
+            let end = self.module.patterns.len().saturating_sub(1);
+            self.retarget_pattern(end);
         }
         Outcome::Edited
     }
 
-    /// Previous or next pattern number in the current order slot.
-    ///
-    /// Stepping past the last pattern appends one blank pattern, which is how
-    /// a ProTracker order entry grows the pattern list: one number at a time.
-    fn step_slot_pattern(&mut self, delta: i32, before: usize) -> Outcome {
-        let pos = self.order_pos;
-        if self.editor.bump_order_pattern(&mut self.module, pos, delta) {
-            self.sync_view_to_order();
-            return self.edited(before);
+    /// How many patterns the pattern pane can show.
+    fn pattern_total(&self) -> usize {
+        if let Some(song) = &self.track {
+            song.patterns.len().max(1)
+        } else {
+            self.module.patterns.len().max(1)
         }
-        if delta > 0 && self.editor.new_pattern(&mut self.module, pos) {
-            self.sync_view_to_order();
+    }
+
+    /// Previous or next pattern in the pattern pane. The order list stays put.
+    ///
+    /// Ctrl-Right on the last pattern appends one blank pattern and shows it.
+    /// That pattern is not inserted into the order. Ctrl-Left on pattern 0
+    /// does nothing.
+    fn browse_pattern(&mut self, delta: i32) -> Outcome {
+        let len = self.pattern_total();
+        let delta_isize = isize::try_from(delta).unwrap_or(0);
+        if delta_isize < 0 && self.view_pattern == 0 {
+            self.set_message("Already the first pattern");
+            return Outcome::None;
+        }
+        let next = step(self.view_pattern, delta_isize, len);
+        if next != self.view_pattern {
+            self.retarget_pattern(next);
+            return Outcome::None;
+        }
+        if delta <= 0 {
+            self.set_message("Already the first pattern");
+            return Outcome::None;
+        }
+        if self.is_readonly() {
+            self.set_error("XM and IT songs are read-only. Pattern editing is not supported yet.");
+            return Outcome::None;
+        }
+        if self.editor.append_pattern(&mut self.module) {
+            let created = self.module.patterns.len().saturating_sub(1);
+            self.retarget_pattern(created);
             self.set_message(format!("Pattern {:02}", self.view_pattern));
             return Outcome::Edited;
         }
-        if delta > 0 {
-            self.set_message("Already at 256 patterns");
-        } else {
-            self.set_message("Already the first pattern");
-        }
+        self.set_message("Already at 256 patterns");
         Outcome::None
     }
 
@@ -1489,6 +1530,41 @@ impl App {
     }
 }
 
+/// Status line after a save. `omitted_from` is the first pattern a `.mod` could not store.
+pub(crate) fn save_status(name: &str, omitted_from: Option<usize>, pattern_len: usize) -> String {
+    match unstored_detail(omitted_from, pattern_len) {
+        Some(detail) => format!("Saved {name}. {detail}"),
+        None => format!("Saved {name}"),
+    }
+}
+
+fn unstored_detail(omitted_from: Option<usize>, pattern_len: usize) -> Option<String> {
+    let from = omitted_from?;
+    if pattern_len <= from {
+        return None;
+    }
+    let last = pattern_len - 1;
+    let (which, pronoun) = if from == last {
+        (
+            format!("Pattern {from:02} stays in memory and was not written"),
+            "it",
+        )
+    } else {
+        (
+            format!("Patterns {from:02}-{last:02} stay in memory and were not written"),
+            "them",
+        )
+    };
+    Some(format!(
+        "{which}; a .mod only stores patterns through the highest order entry, so reopening the file will not have {pronoun}"
+    ))
+}
+
+fn is_unstored_notice(text: &str) -> bool {
+    text.contains("stays in memory and was not written")
+        || text.contains("stay in memory and were not written")
+}
+
 fn is_motion(command: Command) -> bool {
     matches!(
         command,
@@ -1535,7 +1611,7 @@ pub fn command_for(app: &App, key: Key) -> Option<Command> {
         return Some(command);
     }
     if app.focus == Focus::Pattern {
-        if let Some(command) = pattern_slot_key(key) {
+        if let Some(command) = pattern_view_key(key) {
             return Some(command);
         }
         if let Some(command) = pattern_chord(key) {
@@ -1639,14 +1715,15 @@ fn global_key(key: Key) -> Option<Command> {
     }
 }
 
-/// Pattern-pane keys that edit the current order slot's pattern number.
+/// Pattern-pane keys that change which pattern is on screen.
 ///
-/// `[` and `]` already walk the order list, in browse and in edit, so they
-/// stay put. Ctrl-Left and Ctrl-Right were free.
-fn pattern_slot_key(key: Key) -> Option<Command> {
+/// `[` and `]` walk the order list. `,` and `.` also change the viewed
+/// pattern, and they stop at the ends. Ctrl-Right past the last pattern
+/// appends a blank one without inserting it into the order.
+fn pattern_view_key(key: Key) -> Option<Command> {
     match key {
-        Key::CtrlLeft => Some(Command::SlotPattern(-1)),
-        Key::CtrlRight => Some(Command::SlotPattern(1)),
+        Key::CtrlLeft => Some(Command::BrowsePattern(-1)),
+        Key::CtrlRight => Some(Command::BrowsePattern(1)),
         _ => None,
     }
 }
@@ -2223,10 +2300,11 @@ mod tests {
     }
 
     #[test]
-    fn pattern_slot_keys_edit_the_current_order_entry() {
+    fn pattern_view_keys_do_not_change_the_order() {
         let mut app = app_with_patterns(2);
         app.module.patterns[0].rows[4][1].period = 856;
         app.module.patterns[1].rows[0][0].period = 214;
+        let order = app.module.order;
         assert_eq!(app.order_pos, 0);
         assert_eq!(app.module.order[0], 0);
         assert_eq!(app.view_pattern, 0);
@@ -2240,29 +2318,39 @@ mod tests {
         );
         assert_eq!(
             command_for(&app, Key::CtrlLeft),
-            Some(Command::SlotPattern(-1))
+            Some(Command::BrowsePattern(-1))
         );
         assert_eq!(
             command_for(&app, Key::CtrlRight),
-            Some(Command::SlotPattern(1))
+            Some(Command::BrowsePattern(1))
+        );
+        assert_eq!(
+            command_for(&app, Key::Char(',')),
+            Some(Command::MovePattern(-1))
+        );
+        assert_eq!(
+            command_for(&app, Key::Char('.')),
+            Some(Command::MovePattern(1))
         );
 
-        assert!(matches!(app.apply(Command::SlotPattern(-1)), Outcome::None));
+        assert!(matches!(
+            app.apply(Command::BrowsePattern(-1)),
+            Outcome::None
+        ));
         assert_eq!(app.message.as_deref(), Some("Already the first pattern"));
         assert!(!app.is_dirty());
-        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.module.order, order);
         assert_eq!(app.editor.undo_len(), 0);
 
         assert!(matches!(
             app.apply(command_for(&app, Key::CtrlRight).unwrap()),
-            Outcome::Edited
+            Outcome::None
         ));
         assert_eq!(app.order_pos, 0, "the order cursor stays on this slot");
-        assert_eq!(app.module.order[0], 1);
-        assert_eq!(app.module.order[1], 1);
+        assert_eq!(app.module.order, order);
         assert_eq!(app.view_pattern, 1);
         assert_eq!(app.module.patterns.len(), 2);
-        assert!(app.is_dirty());
+        assert!(!app.is_dirty());
         assert_eq!(app.module.patterns[0].rows[4][1].period, 856);
         assert_eq!(app.current_cell().unwrap().period, 214);
 
@@ -2271,36 +2359,38 @@ mod tests {
             Outcome::Edited
         ));
         assert_eq!(app.module.patterns.len(), 3);
-        assert_eq!(app.module.order[0], 2);
+        assert_eq!(app.module.order, order, "a new pattern is not inserted");
         assert_eq!(app.view_pattern, 2);
         assert_eq!(app.order_pos, 0);
         assert_eq!(app.module.patterns[2].rows[0][0], Cell::empty());
         assert_eq!(app.module.patterns[2].rows[63][3], Cell::empty());
         assert_eq!(app.message.as_deref(), Some("Pattern 02"));
+        assert!(app.is_dirty());
 
         app.apply(Command::Undo);
         assert_eq!(app.module.patterns.len(), 2);
-        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.module.order, order);
         assert_eq!(app.view_pattern, 1);
-        app.apply(Command::Undo);
-        assert_eq!(app.module.order[0], 0);
-        assert_eq!(app.view_pattern, 0);
         assert!(!app.is_dirty());
-
-        app.apply(Command::Redo);
-        assert_eq!(app.module.order[0], 1);
-        assert_eq!(app.view_pattern, 1);
-        assert_eq!(app.module.patterns.len(), 2);
         app.apply(Command::Redo);
         assert_eq!(app.module.patterns.len(), 3);
-        assert_eq!(app.module.order[0], 2);
+        assert_eq!(app.module.order, order);
         assert_eq!(app.view_pattern, 2);
-
         app.apply(Command::Undo);
-        app.apply(Command::Undo);
-        app.apply(Command::MovePattern(1));
         assert_eq!(app.view_pattern, 1);
-        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.module.patterns.len(), 2);
+
+        app.apply(command_for(&app, Key::Char(',')).unwrap());
+        assert_eq!(app.view_pattern, 0);
+        assert_eq!(app.module.order, order);
+        app.apply(command_for(&app, Key::Char('.')).unwrap());
+        assert_eq!(app.view_pattern, 1);
+        assert_eq!(app.module.order, order);
+        app.apply(command_for(&app, Key::Char('.')).unwrap());
+        assert_eq!(app.view_pattern, 1, ", and . do not append a pattern");
+        assert_eq!(app.module.patterns.len(), 2);
+        assert!(!app.is_dirty());
+
         app.apply(Command::ToggleEdit);
         app.apply(Command::EnterNote(0));
         assert_eq!(app.module.patterns[1].rows[0][0].sample, 1);
@@ -2310,7 +2400,7 @@ mod tests {
             "undoing a cell stays on the pattern being edited"
         );
         assert_eq!(app.module.patterns[1].rows[0][0].period, 214);
-        assert_eq!(app.module.order[0], 0);
+        assert_eq!(app.module.order, order);
 
         app.focus = Focus::Order;
         app.editing = false;
@@ -2320,16 +2410,18 @@ mod tests {
         app.apply(command_for(&app, Key::Up).unwrap());
         assert_eq!(app.module.patterns.len(), patterns);
         assert_eq!(app.message.as_deref(), Some("N makes a new pattern"));
+        assert_eq!(app.module.order[0], 1);
     }
 
     #[test]
-    fn pattern_slot_keys_follow_pattern_focus_including_edit_mode() {
+    fn pattern_view_keys_follow_pattern_focus_including_edit_mode() {
         let mut app = app_with_patterns(2);
+        let order = app.module.order;
         app.apply(Command::ToggleEdit);
         assert!(app.editing);
         assert_eq!(
             command_for(&app, Key::CtrlRight),
-            Some(Command::SlotPattern(1))
+            Some(Command::BrowsePattern(1))
         );
         assert_eq!(
             command_for(&app, Key::Char('z')),
@@ -2339,10 +2431,14 @@ mod tests {
             command_for(&app, Key::Char('[')),
             Some(Command::MoveOrder(-1))
         );
-        app.apply(command_for(&app, Key::CtrlRight).unwrap());
-        assert_eq!(app.module.order[0], 1);
+        assert!(matches!(
+            app.apply(command_for(&app, Key::CtrlRight).unwrap()),
+            Outcome::None
+        ));
+        assert_eq!(app.module.order, order);
         assert_eq!(app.view_pattern, 1);
         assert!(app.editing);
+        assert!(!app.is_dirty());
 
         app.focus = Focus::Samples;
         assert_eq!(command_for(&app, Key::CtrlLeft), None);
@@ -2360,7 +2456,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_slot_keys_do_not_edit_xm_or_it() {
+    fn pattern_view_keys_do_not_append_on_xm_or_it() {
         for format in [crate::track::Format::Xm, crate::track::Format::It] {
             let mut song = readonly_song();
             song.format = format;
@@ -2368,8 +2464,19 @@ mod tests {
             app.install_track(song, std::path::PathBuf::from("song.xm"));
             app.focus = Focus::Pattern;
             let before = app.order_pattern();
+            assert_eq!(app.view_pattern, 0);
             let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
             assert!(matches!(outcome, Outcome::None));
+            assert_eq!(app.view_pattern, 1);
+            assert_eq!(app.order_pattern(), before);
+            assert_eq!(app.editor.undo_len(), 0);
+            assert!(app.message.is_none());
+
+            app.apply(command_for(&app, Key::CtrlRight).unwrap());
+            assert_eq!(app.view_pattern, 2);
+            let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
+            assert!(matches!(outcome, Outcome::None));
+            assert_eq!(app.view_pattern, 2);
             assert_eq!(app.order_pattern(), before);
             assert_eq!(app.editor.undo_len(), 0);
             let message = app.message.as_deref().unwrap_or("");
@@ -2378,13 +2485,14 @@ mod tests {
                 "{format:?} message was {message}"
             );
             app.apply(command_for(&app, Key::CtrlLeft).unwrap());
+            assert_eq!(app.view_pattern, 1);
             assert_eq!(app.order_pattern(), before);
             assert_eq!(app.editor.undo_len(), 0);
         }
     }
 
     #[test]
-    fn playback_reads_the_pattern_the_slot_now_names() {
+    fn playback_follows_the_order_list_not_the_viewed_pattern() {
         let mut app = app_with_patterns(2);
         app.module.samples[0].volume = 64;
         app.module.samples[0]
@@ -2407,10 +2515,14 @@ mod tests {
 
         app.playing = true;
         let outcome = app.apply(command_for(&app, Key::CtrlRight).unwrap());
-        assert!(matches!(outcome, Outcome::Edited));
-        assert!(app.playing, "a song edit does not stop playback");
+        assert!(matches!(outcome, Outcome::None));
+        assert!(
+            app.playing,
+            "changing the viewed pattern does not stop playback"
+        );
         assert_eq!(app.order_pos, 0);
-        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.view_pattern, 1);
+        assert_eq!(app.module.order[0], 0);
 
         let mut playback = crate::player::Playback::new(crate::player::PlayerConfig {
             sample_rate: 8_000,
@@ -2418,12 +2530,144 @@ mod tests {
         });
         playback.start(&app.module, app.order_pos, 0);
         assert_eq!(playback.order(), 0);
-        assert_eq!(playback.pattern_index(&app.module), 1);
+        assert_eq!(playback.pattern_index(&app.module), 0);
         let mut buffer = vec![0i16; 400];
+        playback.render(&app.module, &mut buffer);
+        assert_eq!(playback.channel(0).unwrap().period, 856);
+
+        app.focus = Focus::Order;
+        app.editing = false;
+        let outcome = app.apply(command_for(&app, Key::Up).unwrap());
+        assert!(matches!(outcome, Outcome::Edited));
+        assert!(app.playing);
+        assert_eq!(app.module.order[0], 1);
+        assert_eq!(app.view_pattern, 1);
+        playback.start(&app.module, app.order_pos, 0);
+        assert_eq!(playback.pattern_index(&app.module), 1);
         playback.render(&app.module, &mut buffer);
         assert_eq!(playback.channel(0).unwrap().period, 214);
         assert_eq!(playback.order(), 0);
         assert_eq!(playback.row(), 0);
+    }
+
+    #[test]
+    fn song_slot_edit_keeps_seventeen_patterns_when_pattern_16_is_unreferenced() {
+        let mut module = Module::new(Tag::Mk);
+        module.song_length = 1;
+        module.order[0] = 16;
+        module.resize_patterns();
+        assert_eq!(module.patterns.len(), 17);
+        module.samples[0].volume = 64;
+        module.samples[0]
+            .set_data(vec![96, 96, 0xA0, 0xA0])
+            .unwrap();
+        module.samples[0].loop_start = 0;
+        module.samples[0].loop_length = 2;
+        for index in 0..17 {
+            module.patterns[index].rows[0][0] = Cell {
+                sample: 1,
+                period: 856,
+                effect: 0,
+                param: u8::try_from(index).unwrap(),
+            };
+        }
+        module.patterns[15].rows[0][0].period = 428;
+        module.patterns[16].rows[0][0].period = 214;
+        module.patterns[16].rows[8][2].period = 320;
+        let pattern_16 = module.patterns[16].clone();
+
+        let mut app = App::new(module);
+        assert_eq!(app.view_pattern, 16);
+        assert_eq!(app.order_pattern(), 16);
+        assert_eq!(app.current_cell().unwrap().period, 214);
+
+        app.focus = Focus::Order;
+        assert!(matches!(
+            app.apply(command_for(&app, Key::Down).unwrap()),
+            Outcome::Edited
+        ));
+        assert_eq!(app.module.order[0], 15);
+        assert!(app.module.order.iter().skip(1).all(|slot| *slot == 0));
+        assert_eq!(app.module.patterns.len(), 17);
+        assert_eq!(app.module.patterns[16], pattern_16);
+        assert_eq!(app.view_pattern, 15);
+        assert_eq!(app.current_cell().unwrap().period, 428);
+
+        app.apply(command_for(&app, Key::Up).unwrap());
+        assert_eq!(app.module.order[0], 16);
+        assert_eq!(app.view_pattern, 16);
+        assert_eq!(app.module.patterns[16], pattern_16);
+        assert_eq!(app.current_cell().unwrap().period, 214);
+
+        app.apply(command_for(&app, Key::Down).unwrap());
+        assert_eq!(app.module.order[0], 15);
+        app.focus = Focus::Pattern;
+        assert!(matches!(
+            app.apply(command_for(&app, Key::CtrlRight).unwrap()),
+            Outcome::None
+        ));
+        assert_eq!(app.view_pattern, 16);
+        assert_eq!(app.module.order[0], 15);
+        assert_eq!(app.module.patterns.len(), 17);
+        assert_eq!(app.module.patterns[16], pattern_16);
+        assert_eq!(app.current_cell().unwrap().period, 214);
+        assert_eq!(app.module.patterns[16].rows[8][2].period, 320);
+
+        app.apply(Command::Undo);
+        assert_eq!(app.module.order[0], 16);
+        assert_eq!(app.module.patterns[16], pattern_16);
+        app.apply(Command::Redo);
+        assert_eq!(app.module.order[0], 15);
+        assert_eq!(app.view_pattern, 15);
+        assert_eq!(app.module.patterns[16], pattern_16);
+
+        app.view_pattern = 16;
+        app.playing = true;
+        let mut playback = crate::player::Playback::new(crate::player::PlayerConfig {
+            sample_rate: 8_000,
+            ..crate::player::PlayerConfig::default()
+        });
+        playback.start(&app.module, 0, 0);
+        assert_eq!(playback.pattern_index(&app.module), 15);
+        let mut buffer = vec![0i16; 400];
+        playback.render(&app.module, &mut buffer);
+        assert_eq!(playback.channel(0).unwrap().period, 428);
+        assert_eq!(app.module.patterns[16], pattern_16);
+
+        let path =
+            std::env::temp_dir().join(format!("omatrack-pattern-16-{}.mod", std::process::id()));
+        app.path = path.clone();
+        assert!(app.module.to_bytes().is_err());
+        let message = app.save().unwrap();
+        assert!(
+            message.contains("Pattern 16") && message.contains("was not written"),
+            "{message}"
+        );
+        assert!(message.contains("will not have it"), "{message}");
+        let notice = app.notice.as_deref().unwrap_or("");
+        assert!(notice.contains("Pattern 16"), "{notice}");
+        assert!(!app.is_dirty());
+        let loaded = Module::load(&path).unwrap();
+        assert_eq!(loaded.patterns.len(), 16);
+        assert_eq!(loaded.order[0], 15);
+        assert_eq!(loaded.patterns[15].rows[0][0].period, 428);
+        assert_eq!(app.module.patterns.len(), 17);
+        assert_eq!(app.module.patterns[16], pattern_16);
+
+        app.focus = Focus::Order;
+        app.order_pos = 0;
+        app.editing = false;
+        app.apply(command_for(&app, Key::Up).unwrap());
+        assert_eq!(app.module.order[0], 16);
+        let message = app.save().unwrap();
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap();
+        assert_eq!(message, format!("Saved {name}"));
+        assert!(app.notice.is_none());
+        let loaded = Module::load(&path).unwrap();
+        assert_eq!(loaded.patterns.len(), 17);
+        assert_eq!(loaded.patterns[16], pattern_16);
+        assert_eq!(loaded, app.module);
+        let _ = std::fs::remove_file(path);
     }
 
     fn readonly_song() -> crate::Song {
