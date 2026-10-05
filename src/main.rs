@@ -417,9 +417,9 @@ or omarchy. SIGUSR1 reloads it, and so does a change to the theme file.
 protracker and phosphor are built in. terminal uses ANSI colors so the
 terminal's own theme shows through.
 
-The tracker opens on the spectrum. default_view in the config file is
-spectrum, scope, or off. A terminal too short for the spectrum panel
-keeps the pattern and does not report an error.
+The tracker opens on the spectrum beside the sample list. Channel meters
+sit under the pattern columns. default_view in the config file is
+spectrum, scope, or off.
 
 Keys:
     Enter                edit / browse
